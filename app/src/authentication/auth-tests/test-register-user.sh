@@ -1,5 +1,6 @@
 #!/bin/bash
 # unorthodox semi-sloppy testing script with curl
+
 # Define the base URL
 BASE_URL="http://localhost:8080"
 
@@ -11,8 +12,8 @@ echo "1. Testing user registration..."
 REGISTER_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/register" \
   -H "Content-Type: application/json" \
   -d '{
-    "user_name": "testuser",
-    "password": "testpass123",
+    "user_name": "test",
+    "password": "password",
     "name": "Test User"
   }')
 echo "Register Response: $REGISTER_RESPONSE"
@@ -23,11 +24,14 @@ echo "2. Testing login with correct credentials..."
 LOGIN_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/login" \
   -H "Content-Type: application/json" \
   -d '{
-    "user_name": "testuser",
-    "password": "testpass123"
+    "user_name": "test",
+    "password": "password"
   }')
 echo "Login Response: $LOGIN_RESPONSE"
 echo "----------------------------"
+
+# Extract token from login response for protected endpoint tests
+TOKEN=$(echo $LOGIN_RESPONSE | jq -r '.data.token')
 
 # Test 3: Login with incorrect password
 echo "3. Testing login with incorrect password..."

@@ -1,5 +1,5 @@
 # Some issues lead to needing to run this: 
-# export $(grep -v '^#' <absolute-path-to-.env | xargs)
+# export $(grep -v '^#' authentication/.env | xargs)
 # docker compose -f <absolute-path-to-docker-compose> up -d --build
 
 services:
