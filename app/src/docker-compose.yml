@@ -1,0 +1,51 @@
+# Some issues lead to needing to run this: 
+# export $(grep -v '^#' <absolute-path-to-.env | xargs)
+# docker compose -f <absolute-path-to-docker-compose> up -d --build
+
+services:
+  auth-service:
+    build: 
+      context: ./authentication
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./authentication/.env
+    environment:
+      - DB_HOST=auth-db  # Override the DB_HOST from .env for communication
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  auth-db:
+    image: postgres:15-alpine
+    env_file:
+      - ./authentication/.env
+    environment:
+      POSTGRES_USER: ${DB_USER}      # Will be SENG468
+      POSTGRES_PASSWORD: ${DB_PASSWORD}  # Will be SENG468-Student
+      POSTGRES_DB: ${DB_NAME}        # Will be user-login
+    ports:
+      - "5432:5432"
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]  
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  trading-network:
+    name: trading-network
+    driver: bridge
+
+volumes:
+  auth-db-data:
+    name: auth-db-data
