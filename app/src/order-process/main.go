@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	// CockroachDB
@@ -96,7 +98,12 @@ func initDB() error {
 	fmt.Println("Connected to CockroachDB successfully!")
 
 	cluster := gocql.NewCluster(os.Getenv("CASSANDRA_DB_HOST"))
+	cluster.Port, _ = strconv.Atoi(os.Getenv("CASSANDRA_DB_PORT"))
 	cluster.Keyspace = os.Getenv("CASSANDRA_DB_KEYSPACE")
+	cluster.Authenticator = gocql.PasswordAuthenticator{
+		Username: os.Getenv("DB_USER"),
+		Password: os.Getenv("DB_PASSWORD"),
+	}
 	cluster.Consistency = gocql.Quorum
 
 	cassandraDB, err = cluster.CreateSession()
@@ -129,7 +136,22 @@ func applyMigrations() error {
 	}
 
 	// CassandraDB
-	migration := "migrations/003_active_order_table.cql"
+	csd := "migrations/003_stock_table.cql"
+	migration, err := os.ReadFile(csd)
+	if err != nil {
+		return fmt.Errorf("error reading migration file %s: %v", csd, err)
+	}
+
+	migrationQueries := strings.Split(string(migration), ";")
+	for _, query := range migrationQueries {
+		if query != "" {
+			err := cassandraDB.Query(query).Exec()
+			if err != nil {
+				return fmt.Errorf("error applying migration %s: %v", csd, err)
+			}
+		}
+	}
+	log.Printf("Migration %s applied successfully\n", csd)
 
 	return nil
 }
@@ -142,12 +164,12 @@ func init() {
 	}
 	// Initialize database connection
 	if err := initDB(); err != nil {
-		log.Fatal("Failed to initialize Timescale database:", err)
+		log.Fatal("Failed to initialize databases:", err)
 	}
 }
 
 func getUserBalance(userID int) float64 {
-	walletServiceURL := fmt.Sprintf("http://wallet-service:8082/api/v1/wallet/balance?user_id=%d", userID)
+	walletServiceURL := fmt.Sprintf("http://localhost:8000/api/v1/wallet/balance?user_id=%d", userID)
 
 	connected, err := http.Get(walletServiceURL)
 	if err != nil {
