@@ -1,4 +1,4 @@
--- TIMESCALEDB
+-- TIMESCALE DB
 
 CREATE TABLE buy_orders (
     order_id SERIAL PRIMARY KEY,
@@ -8,7 +8,7 @@ CREATE TABLE buy_orders (
     quantity INT NOT NULL,
     price DECIMAL(10,2) NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    created TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE sell_orders (
@@ -19,8 +19,7 @@ CREATE TABLE sell_orders (
     quantity INT NOT NULL,
     price DECIMAL(10,2) NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    created TIMESTAMP DEFAULT NOW()
-    -- FOREIGN KEY (order_id) REFERENCES buy_orders(order_id)
+    created_at TIMESTAMP DEFAULT NOW()
 )
 
 -- Active Order Processing	CockroachDB	Ensures transaction safety & high availability

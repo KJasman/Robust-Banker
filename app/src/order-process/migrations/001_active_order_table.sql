@@ -1,4 +1,4 @@
--- COCKROACHDB
+-- COCKROACH DB
 
 -- Enable UUID extension (if using UUIDs)
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -11,7 +11,8 @@ CREATE TABLE buy_orders (
     quantity INT NOT NULL,
     price DECIMAL(10,2) NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    created TIMESTAMPTZ DEFAULT now()
+    created_at TIMESTAMPTZ DEFAULT now()
+    updated_at TIMESTAMPTZ DEFAULT now(),
 );
 
 CREATE TABLE sell_orders (
@@ -22,7 +23,7 @@ CREATE TABLE sell_orders (
     quantity INT NOT NULL,
     price DECIMAL(10,2) NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    created TIMESTAMPTZ DEFAULT now(),
-    -- Foreign Key Constraint (optional, consider performance impact)
-    FOREIGN KEY (stock_id) REFERENCES buy_orders(stock_id) ON DELETE CASCADE
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
 );
+
