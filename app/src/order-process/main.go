@@ -27,10 +27,11 @@ type Order struct {
 	// OrderID   int       `json:"order_id"`
 	StockID   int       `json:"stock_id"`
 	StockData Stock     `json:"stock_data"`
-	Type      string    `json:"type"`
+	OrderType string    `json:"order_type"`
+	IsBuy     string    `json:"is_buy"`
 	Quantity  int       `json:"quantity"`
 	Price     float64   `json:"price"`
-	Status    string    `json:"status"`
+	Status    string    `json:"order_status"`
 	Created   time.Time `json:"created"`
 }
 
@@ -43,6 +44,11 @@ type Stock struct {
 }
 
 type User struct {
+	UserID  int     `json:"user_id"`
+	Balance float64 `json:"balance"`
+}
+
+type Wallet struct {
 	UserID  int     `json:"user_id"`
 	Balance float64 `json:"balance"`
 }
@@ -82,9 +88,9 @@ func initDB() error {
 	}
 	if err = timescaleDB.Ping(); err != nil {
 		timescaleDB.Close()
-		return fmt.Errorf("error connecting to the database: %v", err)
+		return fmt.Errorf("❌error connecting to the database: %v", err)
 	}
-	fmt.Println("Connected to TimescaleDB successfully!")
+	fmt.Println("✅Connected to TimescaleDB successfully!")
 
 	cr := buildDatabaseURL("COCKROACH_DB_HOST", "COCKROACH_DB_PORT", "COCKROACH_DB_NAME")
 	cockroachDB, err := sql.Open("postgres", cr)
@@ -93,9 +99,9 @@ func initDB() error {
 	}
 	if err = cockroachDB.Ping(); err != nil {
 		cockroachDB.Close()
-		return fmt.Errorf("error connecting to the database: %v", err)
+		return fmt.Errorf("❌error connecting to the database: %v", err)
 	}
-	fmt.Println("Connected to CockroachDB successfully!")
+	fmt.Println("✅Connected to CockroachDB successfully!")
 
 	cluster := gocql.NewCluster(os.Getenv("CASSANDRA_DB_HOST"))
 	cluster.Port, _ = strconv.Atoi(os.Getenv("CASSANDRA_DB_PORT"))
@@ -108,9 +114,9 @@ func initDB() error {
 
 	cassandraDB, err = cluster.CreateSession()
 	if err != nil {
-		return fmt.Errorf("error connecting to Cassandra: %v", err)
+		return fmt.Errorf("❌error connecting to Cassandra: %v", err)
 	}
-	fmt.Println("Connected to CassandraDB successfully!")
+	fmt.Println("✅Connected to CassandraDB successfully!")
 
 	return applyMigrations()
 }
@@ -129,10 +135,10 @@ func applyMigrations() error {
 
 		_, err = db.Exec(string(migration))
 		if err != nil {
-			return fmt.Errorf("error applying migration %s: %v", filePath, err)
+			return fmt.Errorf("❌error applying migration %s: %v", filePath, err)
 		}
 
-		log.Printf("Migration %s applied successfully\n", filePath)
+		log.Printf("✅Migration %s applied successfully\n", filePath)
 	}
 
 	// CassandraDB
@@ -147,11 +153,11 @@ func applyMigrations() error {
 		if query != "" {
 			err := cassandraDB.Query(query).Exec()
 			if err != nil {
-				return fmt.Errorf("error applying migration %s: %v", csd, err)
+				return fmt.Errorf("❌error applying migration %s: %v", csd, err)
 			}
 		}
 	}
-	log.Printf("Migration %s applied successfully\n", csd)
+	log.Printf("✅Migration %s applied successfully\n", csd)
 
 	return nil
 }
@@ -184,8 +190,11 @@ func getUserBalance(userID int) float64 {
 		log.Println("Error decoding response:", err)
 		return 0
 	}
-
-	return response.Data.(float64)
+	var balance float64
+	if response.Success {
+		balance = response.Data.Wallet.Balance
+	}
+	return balance
 }
 
 func placeOrderHandler(c *gin.Context) {
@@ -208,26 +217,33 @@ func placeOrderHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient balance"})
 		return
 	}
-
-	orderPlacement(request, c)
+	if request.OrderType == "MARKET" {
+		placeMarketOrder(request, c)
+	} else if request.OrderType == "LIMIT" {
+		placeLimitOrder(request, c)
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid order type"})
+	}
 }
 
-func orderPlacement(request Order, c *gin.Context) {
+func placeMarketOrder(request Order, c *gin.Context) {
+	// Market order, buy/sell immediate stock at current price 
 	var orderID int
 	var err error
 
-	if request.Type == "buy" {
-		err = cockroachDB.QueryRow(
-			"INSERT INTO buy_orders (user_id, stock_id, type, quantity, price, status, created) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING order_id",
-			request.UserID, request.StockID, request.Type, request.Quantity, request.Price, "pending", time.Now(),
+	if request.IsBuy == true {
+		err = cockroachDB.QueryRow( // does the uninitialized value will be set with default value?
+			"INSERT INTO market_buy (stock_id, order_type, quantity, price, created) VALUES ($1, $2, $3, $4, $5) RETURNING order_id",
+			request.StockID, request.OrderType, request.Quantity, request.Price, time.Now(),
 		).Scan(&orderID)
 
-	} else if request.Type == "sell" {
-		err = cockroachDB.QueryRow(
-			"INSERT INTO sell_orders (user_id, stock_id, type, quantity, price, status, created) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING order_id",
-			request.UserID, request.StockID, request.Type, request.Quantity, request.Price, "pending", time.Now(),
-		).Scan(&orderID)
+	} else if request.IsBuy == false {
+		err = cockroachDB.QueryRow(// is it nescessary to take price input as the default value is null?
+			"INSERT INTO market_sell (stock_id, order_type, quantity, price, created) VALUES ($1, $2, $3, $4, $5) RETURNING order_id",
+			request.StockID, request.OrderType, request.Quantity, request.Price, time.Now(),
+		).Scan(&orderID) // what does this do? do i need to rearrange the order by any specific order for the matching engine?
 	}
+	// should i have active and completed order proess in the same server?
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create order"})
@@ -235,6 +251,15 @@ func orderPlacement(request Order, c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Order created successfully", "order_id": orderID})
 }
+
+// func placeLimitOrder(request Order, c *gin.Context) {
+// 	// Sort buy order in descending by bid price and ascending time for those with same price
+// 	// sell oder in ascending by ask price and ascending time for same price
+// }
+
+// funv cancelLimitOrder() {
+
+// }
 
 func main() {
 	r := gin.Default()
