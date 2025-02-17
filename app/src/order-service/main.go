@@ -37,7 +37,7 @@ type Stock struct {
 	StockID     int       `json:"stock_id"`
 	StockName   string    `json:"name"`
 	MarketPrice float64   `json:"market_price"`
-	Updated     time.Time `json:"updated"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type User struct {
@@ -127,6 +127,7 @@ func initDB() error {
 
 	return applyMigrations()
 }
+
 func applyMigrations() error {
 	csd1 := "migrations/001_active_order_table.cql"
 	migration, err := os.ReadFile(csd1)
@@ -208,6 +209,18 @@ func init() {
 // }
 
 func createStock(c *gin.Context) {
+	userID := c.GetHeader("X-User-ID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	userType := c.GetHeader("X-User-Type")
+	if userType != "COMPANY" && userType == "CUSTOMER" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized - Only companies can create stocks"})
+		return
+	}
+
 	var stock struct {
 		StockName string `json:"stock_name"`
 	}
@@ -224,24 +237,43 @@ func createStock(c *gin.Context) {
 		return
 	}
 
-	stockID := gocql.TimeUUID()
-	marketPrice := 0.0
+	var totalStocks int
 
+	err = stocksSession.Query("SELECT COUNT(*) FROM stocks").Scan(&totalStocks)
+	if err != nil {
+		fmt.Println("❌Error fetching total stocks:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching total stocks"})
+		return
+	}
+	// stockID := gocql.TimeUUID()
+	var stockData Stock
+	stockData.StockID = totalStocks + 1
+	stockData.MarketPrice = 0.0
+
+	currentTime := time.Now()
+	stockData.UpdatedAt = currentTime
 	err = stocksSession.Query(`
 		INSERT INTO stocks (stock_id, stock_name, market_price, updated_at)
 		VALUES (?, ?, ?, ?)`,
-		stockID,
+		stockData.StockID,
 		stock.StockName,
-		marketPrice,
-		time.Now(),
+		stockData.MarketPrice,
+		stockData.UpdatedAt,
 	).Exec()
+
 	if err != nil {
 		fmt.Println("❌Error inserting stock into database:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error inserting stock into database"})
 		return
 	}
-	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
+
+	type StockID struct {
+		ID int `json:"stock_id"`
+	}
+
+	c.JSON(http.StatusOK, Response{Success: true, Data: StockID{ID: stockData.StockID}})
 }
+
 func placeOrderHandler(c *gin.Context) {
 	userID := c.GetHeader("X-User-ID")
 	fmt.Println("✅ Authorized User ID:", userID)
@@ -254,12 +286,14 @@ func placeOrderHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
 		return
 	}
+
 	// Parse request body
 	var request Order
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
+
 	request.UserID = userIDint
 
 	// Validate request
@@ -274,6 +308,7 @@ func placeOrderHandler(c *gin.Context) {
 	// 	c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient balance"})
 	// 	return
 	// }
+
 	if request.OrderType == "MARKET" {
 		placeMarketOrder(request, userIDint, c)
 	} else if request.OrderType == "LIMIT" {
@@ -281,7 +316,6 @@ func placeOrderHandler(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid order type"})
 	}
-
 }
 
 func placeMarketOrder(request Order, userID int, c *gin.Context) {
@@ -364,10 +398,12 @@ func cancelLimitOrder(c *gin.Context) {
 		"SELECT order_id, created_at FROM orders_keyspace.limit_buy WHERE user_id = ? AND stock_id = ?",
 		"SELECT order_id, created_at FROM orders_keyspace.limit_sell WHERE user_id = ? AND stock_id = ?",
 	}
+
 	var orderDetails []struct {
 		OrderID   string
 		CreatedAt time.Time
 	}
+
 	for _, query := range queries {
 		iter := ordersSession.Query(query, userIDint, request.StockTxID).Iter()
 

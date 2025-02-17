@@ -39,9 +39,9 @@ func createReverseProxy(targetURL string) gin.HandlerFunc {
 		if userID, exists := c.Get("user_id"); exists {
 			c.Request.Header.Set("X-User-ID", fmt.Sprintf("%v", userID)) // Forward user_id as a header
 		}
-		// if userType, exists := c.Get("user_type"); exists {
-		// 	c.Request.Header.Set("X-User-Type", fmt.Sprintf("%v", userType)) // Forward user_type as a header
-		// }
+		if userType, exists := c.Get("user_type"); exists {
+			c.Request.Header.Set("X-User-Type", fmt.Sprintf("%v", userType)) // Forward user_type as a header
+		}
 
 		proxy.ServeHTTP(c.Writer, c.Request)
 	}
