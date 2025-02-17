@@ -1,111 +1,116 @@
-package main // main backend server 
+package main
 
 import (
-	// MODULES
-	"database/sql" // SQL database
-	"fmt" 		   // I/O
-	"log"		   // logs errors and messages
-	"net/http"	   // http requests
-	"os"		   // read environment variables
-	"time"		   // time-related operations 
+	"database/sql"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
 
-	// LIBRARIES
-	"github.com/gin-gonic/gin"      // Gin framework for handling HTTP requests
-	"github.com/golang-jwt/jwt/v5"	// JWT authentication
-	"github.com/joho/godotenv"		// environment variables
-	_ "github.com/lib/pq"			// PostgreSQL database driver 
-	"golang.org/x/crypto/bcrypt"	// Hash and Verify passwords securely 
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
-// DATABASE: define expected request bodies for LOGIN and REGISTRATION
-type User struct {
-//  name	 dtype  json field mapping: ensure json request/response uses "..."
+// User type constants
+const (
+	UserTypeCustomer = "CUSTOMER"
+	UserTypeCompany  = "COMPANY"
+)
+
+// Base user struct with common fields
+type BaseUser struct {
 	ID       int    `json:"id"`
 	Username string `json:"user_name"`
 	Password string `json:"password"`
-	Name     string `json:"name"`
+	UserType string `json:"user_type"`
 }
 
+// Customer specific user struct
+type CustomerUser struct {
+	BaseUser
+	Name       string `json:"name"`
+	CustomerID string `json:"customer_id"`
+}
+
+// Company specific user struct
+type CompanyUser struct {
+	BaseUser
+	CompanyName string `json:"company_name"`
+	CompanyID   string `json:"company_id"`
+}
+
+// Request structs
 type LoginRequest struct {
 	Username string `json:"user_name"`
 	Password string `json:"password"`
 }
 
-type RegisterRequest struct {
+type RegisterCustomerRequest struct {
 	Username string `json:"user_name"`
 	Password string `json:"password"`
 	Name     string `json:"name"`
 }
 
+type RegisterCompanyRequest struct {
+	Username    string `json:"user_name"`
+	Password    string `json:"password"`
+	CompanyName string `json:"company_name"`
+}
+
 type Token struct {
-    SignedToken string `json:"token"`
-} 
+	SignedToken string `json:"token"`
+}
 
 type Response struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data"`
-	Message string      `json:"message,omitempty"` 
+	Message string      `json:"message,omitempty"`
 }
 
-// SET UP 
 var db *sql.DB
 
 func buildDatabaseURL() string {
-	// Database Connection: define how the app connects to databases
-	// retrieve db connection details directly from the operating system's environment variables
-	host := os.Getenv("DB_HOST") // hostname / IP address of db server 
-	port := os.Getenv("DB_PORT") // port number database listens on (PostgreSQL: 5432, MySQL: 3306)
-	user := os.Getenv("DB_USER") // databse username for authentification, different microservice may have different
-	password := os.Getenv("DB_PASSWORD") // user authentification to db server, can only access to its own table
-	dbname := os.Getenv("DB_NAME") // databse name to connect to
-	sslmode := os.Getenv("DB_SSLMODE") // define whether SSL encryption is enabled
-
-	// return string is used by sql.Open("postgres", connStr) to establish a database connection
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		host, port, user, password, dbname, sslmode,
+		os.Getenv("DB_HOST"),
+		os.Getenv("DB_PORT"),
+		os.Getenv("DB_USER"),
+		os.Getenv("DB_PASSWORD"),
+		os.Getenv("DB_NAME"),
+		os.Getenv("DB_SSLMODE"),
 	)
 }
 
 func initDB() error {
-	// Build connection string from environment variables
-	connStr := buildDatabaseURL() 
+	connStr := buildDatabaseURL()
 
 	var err error
-	db, err = sql.Open("postgres", connStr) // create database connection
+	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		return fmt.Errorf("error opening database: %v", err)
 	}
 
-	// Configure connection pool to limit database resource usage 
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// Test connection
 	if err = db.Ping(); err != nil {
 		return fmt.Errorf("error connecting to the database: %v", err)
 	}
 
-	return applyMigrations() // if no error occurs, call next function
+	return applyMigrations()
 }
 
-// One Migration 
 func applyMigrations() error {
-	// Automate database migration by reading and executing SQL file that define db structure 
-	// Ensure the app starts and db exist and structure is set up correctly
-	// Return: nil if correct schema, otherwise, triggers error
-
-	// Read migration file: instead of hardcoding SQL commands here, keep them in separate file 
-	//                      allows us to modify the db schema without changing this file
-	// Separate sql file is only used for Schema setup, not include queries 
-	// that are a part of application's dynamic logic, hard code in that case 
 	migration, err := os.ReadFile("migrations/001_create_users_table.sql")
 	if err != nil {
 		return fmt.Errorf("error reading migration file: %v", err)
 	}
 
-	// Execute migration
 	_, err = db.Exec(string(migration))
 	if err != nil {
 		return fmt.Errorf("error applying migration: %v", err)
@@ -115,107 +120,170 @@ func applyMigrations() error {
 	return nil
 }
 
-func init() {
-	// Load .env file and set the environment variables
-	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found")
-	}
-
-	// Initialize database connection, read environment variables
-	if err := initDB(); err != nil {
-		log.Fatal("Failed to initialize database:", err)
-	}
-}
-
-// AUTHENTIFICATION
-func generateToken(userID int, username string) (string, error) {
-	// Generate token for authenticated user (successfully log in)
+func generateToken(userID int, username, userType string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id":  userID,
-		"username": username,
-		"exp":      time.Now().Add(time.Hour * 12).Unix(), // 12 hour expiration
-		"iat":      time.Now().Unix(), // issued time
+		"user_id":   userID,
+		"username":  username,
+		"user_type": userType,
+		"exp":       time.Now().Add(time.Hour * 12).Unix(),
+		"iat":       time.Now().Unix(),
 	})
 
-	// Sign "token" using JWT_SECRET key from environment variables
 	tokenString, err := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
 	if err != nil {
 		return "", err
 	}
 
-	return tokenString, nil // return signed JWT token, send to frontend 
-	// frontend stores the token in local storage or HTTP headers
-	// Every future API request includes:
-	// Authorization: Bearer <JWT_TOKEN>
+	return tokenString, nil
 }
 
-func registerHandler(c *gin.Context) {
-	// Take one parameter: request context from Gin 
-
-	// Parse "Register" Request  
-	var req RegisterRequest // declare variable "req" struct type "RegisterRequest"
-	// read request body and maps it to "req"
-	// c helps us access request data (JSON input) and send responses (JSON output).
+func registerCustomerHandler(c *gin.Context) {
+	var req RegisterCustomerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, Response{Success: false, Message: "Invalid request body"})
-		// if parsing failed, return 400 Bad Request
 		return
 	}
 
+	// Generate customer ID
+	customerID := fmt.Sprintf("CUST-%d", time.Now().Unix())
+
 	// Hash password
-	// securely encrypt pw by bcrypt hashing before storing in db 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil { // if hashing fails, send HTTP 500 Internal Server Error 
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error processing password"})
 		return
 	}
 
-	// Insert new user
-	var userID int
-	err = db.QueryRow(
-		"INSERT INTO users (username, password, name) VALUES ($1, $2, $3) RETURNING id",
-		req.Username,
-		string(hashedPassword),
-		req.Name,
-	).Scan(&userID)
-
-	// Failed Registration 
+	// Begin transaction
+	tx, err := db.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error creating user"})
 		return
 	}
-	// Successful Registration 
+	defer tx.Rollback()
+
+	// Insert base user
+	var userID int
+	err = tx.QueryRow(
+		`INSERT INTO users (username, password, user_type) VALUES ($1, $2, $3) RETURNING id`,
+		req.Username,
+		string(hashedPassword),
+		UserTypeCustomer,
+	).Scan(&userID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error creating user"})
+		return
+	}
+
+	// Insert customer details
+	_, err = tx.Exec(
+		`INSERT INTO customer_details (user_id, name, customer_id) VALUES ($1, $2, $3)`,
+		userID,
+		req.Name,
+		customerID,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error creating customer details"})
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error completing registration"})
+		return
+	}
+
 	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
 }
 
-func loginHandler(c *gin.Context) {
-	var req LoginRequest // same as req := RegisterRequest{}
+func registerCompanyHandler(c *gin.Context) {
+	var req RegisterCompanyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, Response{Success: false, Message: "Invalid request body"})
 		return
 	}
 
-	// Get user from database
-	var user User // parse existing related data to "username" into "user"
-	err := db.QueryRow(
-		"SELECT id, username, password FROM users WHERE username = $1",
-		req.Username, // username from request
-	).Scan(&user.ID, &user.Username, &user.Password) // extract retrieved data to "user" struct
+	// Generate company ID
+	companyID := fmt.Sprintf("COMP-%d", time.Now().Unix())
 
-	if err != nil { // 401 Unauthorized 
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error processing password"})
+		return
+	}
+
+	// Begin transaction
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error creating user"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Insert base user
+	var userID int
+	err = tx.QueryRow(
+		`INSERT INTO users (username, password, user_type) VALUES ($1, $2, $3) RETURNING id`,
+		req.Username,
+		string(hashedPassword),
+		UserTypeCompany,
+	).Scan(&userID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error creating user"})
+		return
+	}
+
+	// Insert company details
+	_, err = tx.Exec(
+		`INSERT INTO company_details (user_id, company_name, company_id) VALUES ($1, $2, $3)`,
+		userID,
+		req.CompanyName,
+		companyID,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error creating company details"})
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error completing registration"})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
+}
+
+func loginHandler(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Message: "Invalid request body"})
+		return
+	}
+
+	var user BaseUser
+	err := db.QueryRow(
+		"SELECT id, username, password, user_type FROM users WHERE username = $1",
+		req.Username,
+	).Scan(&user.ID, &user.Username, &user.Password, &user.UserType)
+
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, Response{Success: false, Message: "Invalid credentials"})
 		return
 	}
 
-	// Check password: compare pw from request and pw stored in db 
+	// Verify password
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, Response{Success: false, Message: "Invalid credentials"})
 		return
 	}
 
-	// Generate JWT token to Successful Login 
-	token, err := generateToken(user.ID, user.Username)
+	// Generate JWT with user type
+	token, err := generateToken(user.ID, user.Username, user.UserType)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error generating token"})
 		return
@@ -224,14 +292,24 @@ func loginHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, Response{Success: true, Data: Token{SignedToken: token}})
 }
 
+func init() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("Warning: .env file not found")
+	}
+
+	if err := initDB(); err != nil {
+		log.Fatal("Failed to initialize database:", err)
+	}
+}
+
 func main() {
 	r := gin.Default()
 
-	// Authentication endpoints
-	r.POST("/authentication/register", registerHandler)
+	// Authentication endpoints with separate routes for customer and company registration
+	r.POST("/authentication/register/customer", registerCustomerHandler)
+	r.POST("/authentication/register/company", registerCompanyHandler)
 	r.POST("/authentication/login", loginHandler)
 
-	// Start server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

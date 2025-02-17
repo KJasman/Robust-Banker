@@ -18,6 +18,7 @@ services:
       - auth-service
     networks:
       - trading-network
+    restart: unless-stopped
 
   redis:
     image: redis:alpine
@@ -30,6 +31,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   auth-service:
     build: 
@@ -69,106 +71,10 @@ services:
       retries: 5
     restart: unless-stopped
 
-  order-process:
-    build:
-      context: ./order-process
-      dockerfile: Dockerfile
-    ports:
-      - "8081:8081"
-    env_file:
-      - ./order-process/.env
-    environment:
-      - TIMESCALE_DB_HOST=timescale-db
-      - COCKROACH_DB_HOST=cockroach-db
-      - CASSANDRA_DB_HOST=cassandra-db
-      - CASSANDRA_DB_KEYSPACE=${CASSANDRA_DB_KEYSPACE}
-    depends_on:
-      timescale-db:
-        condition: service_healthy
-      cockroach-db:
-        condition: service_healthy
-      cassandra-db:
-        condition: service_healthy
-    networks:
-      - trading-network
-    restart: unless-stopped
-
-  timescale-db:
-    image: postgres:15-alpine
-    env_file:
-      - ./order-process/.env
-    environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${TIMESCALE_DB_NAME}
-    ports:
-      - "5433:5432"
-    volumes:
-      - timescale-db-data:/var/lib/postgresql/data
-    networks:
-      - trading-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${TIMESCALE_DB_NAME}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  cockroach-db:
-    image: cockroachdb/cockroach:latest
-    command: ["start-single-node", "--insecure"]
-    env_file:
-      - ./order-process/.env
-    environment:
-      - COCKROACH_USER=${DB_USER}
-      - COCKROACH_PASSWORD=${DB_PASSWORD} 
-      - COCKROACH_DB=${COCKROACH_DB_NAME}
-    ports:
-      - "26257:26257"
-      - "8080:8080"
-    volumes:
-      - cockroach-db-data:/cockroach/cockroach-data
-    networks:
-      - trading-network
-    healthcheck:
-      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8080/health?ready=1 || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    
-  cassandra-db:
-    image: cassandra:latest
-    env_file:
-      - ./order-process/.env
-    environment:
-      - CASSANDRA_CLUSTER_NAME=trading-cluster
-      - CASSANDRA_USER=${DB_USER}
-      - CASSANDRA_PASSWORD=${DB_PASSWORD}
-      - CASSANDRA_KEYSPACE=${CASSANDRA_DB_KEYSPACE}
-    ports:
-      - "9042:9042"
-    volumes:
-      - cassandra-db-data:/var/lib/cassandra
-    networks:
-      - trading-network
-    healthcheck:
-      test: ["CMD", "cqlsh", "-u", "${DB_USER}", "-p", "${DB_PASSWORD}", "-e", "DESCRIBE KEYSPACES"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
 networks:
-    trading-network:
-      driver: bridge
+  trading-network:
+    driver: bridge
 
 volumes:
   auth-db-data:
     name: auth-db-data
-  timescale-db-data:
-    name: timescale-db-data
-  cockroach-db-data:
-    name: cockroach-db-data
-  cassandra-db-data:
-    name: cassandra-db-data
