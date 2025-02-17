@@ -18,6 +18,7 @@ services:
       - auth-service
     networks:
       - trading-network
+    restart: unless-stopped
 
   redis:
     image: redis:alpine
@@ -30,6 +31,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   auth-service:
     build: 
@@ -113,8 +115,8 @@ services:
     restart: unless-stopped
 
 networks:
-    trading-network:
-      driver: bridge
+  trading-network:
+    driver: bridge
 
 volumes:
   auth-db-data:
