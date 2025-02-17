@@ -4,7 +4,7 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TABLE market_buy (
-    -- order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, -- Prefer UUID for distributed databases
+    order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, -- Prefer UUID for distributed databases
     -- user_id INT NOT NULL, -- References Authentication Service
     stock_id INT NOT NULL,
     order_type TEXT NOT NULL DEFAULT 'MARKET',
@@ -17,7 +17,7 @@ CREATE TABLE market_buy (
 );
 
 CREATE TABLE market_sell (
-    -- order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, 
+    order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, 
     -- user_id INT NOT NULL, -- References Authentication Service
     stock_id INT NOT NULL,
     order_type TEXT NOT NULL DEFAULT 'MARKET',
@@ -30,7 +30,7 @@ CREATE TABLE market_sell (
 );
 
 CREATE TABLE limit_buy (
-    -- order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, 
+    order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, 
     -- user_id INT NOT NULL, -- References Authentication Service
     stock_id INT NOT NULL,
     order_type TEXT NOT NULL DEFAULT 'LIMIT',
@@ -43,7 +43,7 @@ CREATE TABLE limit_buy (
 );
 
 CREATE TABLE limit_sell (
-    -- order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, 
+    order_id UUID DEFAULT gen_random_uuid() PRIMARY KEY, 
     -- user_id INT NOT NULL, -- References Authentication Service
     stock_id INT NOT NULL,
     order_type TEXT NOT NULL DEFAULT 'LIMIT',
@@ -55,4 +55,7 @@ CREATE TABLE limit_sell (
     updated_at TIMESTAMPTZ DEFAULT now(),
 );
 
--- set index on stock_id 
+CREATE INDEX idx_market_buy_stock ON market_buy (stock_id);
+CREATE INDEX idx_market_sell_stock ON market_sell (stock_id);
+CREATE INDEX idx_limit_buy_stock ON limit_buy (stock_id);
+CREATE INDEX idx_limit_sell_stock ON limit_sell (stock_id);
