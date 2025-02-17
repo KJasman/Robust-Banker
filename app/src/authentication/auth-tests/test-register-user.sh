@@ -1,6 +1,5 @@
 #!/bin/bash
 # unorthodox semi-sloppy testing script with curl
-#!/bin/bash
 
 # Color codes for output
 GREEN='\033[0;32m'
