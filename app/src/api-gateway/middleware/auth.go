@@ -40,6 +40,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		}
 
 		tokenString := parts[1]
+		fmt.Println("Token received:", tokenString)
 
 		// Parse and validate the token
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
