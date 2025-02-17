@@ -233,7 +233,7 @@ func createStock(c *gin.Context) {
 	err := stocksSession.Query("SELECT stock_id FROM stocks WHERE stock_name = ?", stock.StockName).Scan(&existingStockName)
 	if err == nil {
 		// Stock with this name already exists
-		c.JSON(http.StatusConflict, gin.H{"error": "Stock with this ID already exists"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Stock with this name already exists"})
 		return
 	}
 
@@ -298,7 +298,7 @@ func placeOrderHandler(c *gin.Context) {
 
 	// Validate request
 	if request.Quantity <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quantity or price"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quantity"})
 		return
 	}
 
@@ -423,7 +423,7 @@ func cancelLimitOrder(c *gin.Context) {
 	}
 
 	if len(orderDetails) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "No orders found for the given stock_tx_id"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No orders found for the given stock_tx_id"})
 		return
 	}
 

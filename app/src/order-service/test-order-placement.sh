@@ -143,7 +143,7 @@ echo -e "Customer Token: ${GREEN}$CUSTOMER_TOKEN${NC}"
 echo -e "Company Token: ${GREEN}$COMPANY_TOKEN${NC}"
 
 # Test 9: Create a Stock (Company Side)
-echo -e "\n${BLUE}11. Testing Create Stock...${NC}"
+echo -e "\n${BLUE}9. Testing Create Stock...${NC}"
 CREATE_STOCK_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/createStock" \
   -H "Authorization: Bearer $COMPANY_TOKEN" \
   -H "Content-Type: application/json" \
@@ -152,7 +152,7 @@ CREATE_STOCK_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/createStock" \
   }')
 test_response "$CREATE_STOCK_RESPONSE" "Create Stock"
 
-echo -e "\n${BLUE}12. Testing Create Stock as Customer...${NC}"
+echo -e "\n${BLUE}10. Testing Create Stock as Customer...${NC}"
 CREATE_STOCK_FAILED=$(curl -s -X POST "${ORDER_BASE_URL}/orders/createStock" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $CUSTOMER_TOKEN" \
@@ -163,7 +163,7 @@ HTTP_STATUS_CODE=$CREATE_STOCK_FAILED
 echo -e "${GREEN}HTTP Status Code:${NC} $HTTP_STATUS_CODE"
 
 # Test 10: Place a Market Order
-echo -e "\n${BLUE}9. Testing Place Market Buy Order...${NC}"
+echo -e "\n${BLUE}11. Testing Place Market Buy Order...${NC}"
 PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $CUSTOMER_TOKEN" \
@@ -175,7 +175,7 @@ PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder
   }')
 test_response "$PLACE_ORDER_RESPONSE" "Place Market Buy Order"
 
-echo -e "\n${BLUE}10. Testing Place Market Sell Order...${NC}"
+echo -e "\n${BLUE}12. Testing Place Market Sell Order...${NC}"
 PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $CUSTOMER_TOKEN" \
@@ -188,7 +188,7 @@ PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder
 test_response "$PLACE_ORDER_RESPONSE" "Place Market Sell Order"
 
 # Test 10: Place a Limit Order
-echo -e "\n${BLUE}9. Testing Place Limit Buy Order...${NC}"
+echo -e "\n${BLUE}13. Testing Place Limit Buy Order...${NC}"
 PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $CUSTOMER_TOKEN" \
@@ -201,7 +201,7 @@ PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder
   }')
 test_response "$PLACE_ORDER_RESPONSE" "Place Limit Buy Order"
 
-echo -e "\n${BLUE}10. Testing Place Limit Sell Order...${NC}"
+echo -e "\n${BLUE}14. Testing Place Limit Sell Order...${NC}"
 PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $CUSTOMER_TOKEN" \
@@ -215,7 +215,7 @@ PLACE_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/placeStockOrder
 test_response "$PLACE_ORDER_RESPONSE" "Place Limit Sell Order"
 
 # Test 11: Cancel a Stock Transaction
-echo -e "\n${BLUE}10. Testing Cancel Stock Transaction...${NC}"
+echo -e "\n${BLUE}15. Testing Cancel Stock Transaction...${NC}"
 CANCEL_ORDER_RESPONSE=$(curl -s -X POST "${ORDER_BASE_URL}/orders/cancelStockTransaction" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $CUSTOMER_TOKEN" \
