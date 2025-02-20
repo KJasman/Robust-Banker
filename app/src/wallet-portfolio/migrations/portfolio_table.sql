@@ -1,0 +1,14 @@
+CREATE TABLE IF NOT EXISTS wallet (
+    wallet_id VARCHAR(36) PRIMARY KEY,
+    user_id SERIAL UNIQUE NOT NULL,
+    balance DECIMAL(10, 2) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS stock_portfolio (
+    portfolio_id SERIAL PRIMARY KEY,
+    wallet_id VARCHAR(36) NOT NULL,
+    stock_id SERIAL NOT NULL,
+    quantity_owned INTEGER NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_id) REFERENCES wallet(wallet_id) ON DELETE CASCADE
+);
