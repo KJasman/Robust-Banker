@@ -1,6 +1,10 @@
 # Some issues lead to needing to run this: 
 # export $(grep -v '^#' authentication/.env | xargs)
 # docker compose -f <absolute-path-to-docker-compose> up -d --build
+
+# We are aware of the security implications of environment variable
+# instantiation in a docker compose file, however as this is an 
+# academic project, this is more convenient.
 services:
   api-gateway:
     build: 
@@ -10,9 +14,9 @@ services:
       - "8000:8000"
     environment:
       - PORT=8000
-      - JWT_SECRET=${JWT_SECRET}
-      - RATE_LIMIT=${RATE_LIMIT}
-      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW}
+      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
+      - RATE_LIMIT=100
+      - RATE_LIMIT_WINDOW=10000
     depends_on:
       - redis
       - auth-service
@@ -39,10 +43,15 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
-    env_file:
-      - ./authentication/.env
     environment:
+      - PORT=8080
+      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
       - DB_HOST=auth-db
+      - DB_PORT=5432
+      - DB_USER=SENG468
+      - DB_PASSWORD=SENG468-Student
+      - DB_NAME=user-login
+      - DB_SSLMODE=disable
     depends_on:
       auth-db:
         condition: service_healthy
@@ -52,12 +61,10 @@ services:
 
   auth-db:
     image: postgres:15-alpine
-    env_file:
-      - ./authentication/.env
     environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: SENG468
+      POSTGRES_PASSWORD: SENG468-Student
+      POSTGRES_DB: user-login
     ports:
       - "5432:5432"
     volumes:
@@ -65,7 +72,48 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U SENG468 -d user-login"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  order-history-service:
+    build: 
+      context: ./order-history
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - TIMESCALE_HOST=timescale-db
+      - TIMESCALE_PORT=5432  
+      - TIMESCALE_USER=history_user
+      - TIMESCALE_PASSWORD=history_password
+      - TIMESCALE_DB=order_history
+      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
+    depends_on:
+      timescale-db:
+        condition: service_healthy
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  timescale-db:
+    image: timescale/timescaledb:latest-pg15
+    environment:
+      POSTGRES_USER: history_user
+      POSTGRES_PASSWORD: history_password
+      POSTGRES_DB: order_history
+    ports:
+      - "5433:5432"  # Map host 5433 to container 5432
+    volumes:
+      - timescale-db-data:/var/lib/postgresql/data
+      - ./order-history/migrations:/docker-entrypoint-initdb.d
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U history_user -d order_history"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -77,30 +125,38 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8081:8081"
-    env_file:
-      - ./order-service/.env
     environment:
+      - PORT=8081
+      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
+      - RATE_LIMIT=100
+      - RATE_LIMIT_WINDOW=10000
       - CASSANDRA_DB_HOST=cassandra-db
-      - CASSANDRA_STOCKS_KEYSPACE=${CASSANDRA_STOCKS_KEYSPACE}
-      - CASSANDRA_ORDERS_KEYSPACE=${CASSANDRA_ORDERS_KEYSPACE}
+      - CASSANDRA_DB_PORT=9042
+      - CASSANDRA_STOCKS_KEYSPACE=stocks_keyspace
+      - CASSANDRA_ORDERS_KEYSPACE=orders_keyspace
+      - DB_USER=SENG468
+      - DB_PASSWORD=SENG468-Student
+      - DB_NAME=user-login
+      - DB_SSLMODE=disable
+      - CASSANDRA_DB_HOST=cassandra-db
     depends_on:
       cassandra-db:
         condition: service_healthy
     networks:
       - trading-network
     restart: unless-stopped
-
     
   cassandra-db:
     image: cassandra:latest
-    env_file:
-      - ./order-service/.env
     environment:
       - CASSANDRA_CLUSTER_NAME=trading-cluster
-      - CASSANDRA_USER=${DB_USER}
-      - CASSANDRA_PASSWORD=${DB_PASSWORD}
-      - CASSANDRA_STOCKS_KEYSPACE=${CASSANDRA_STOCKS_KEYSPACE}
-      - CASSANDRA_ORDERS_KEYSPACE=${CASSANDRA_ORDERS_KEYSPACE}
+      - CASSANDRA_USER=SENG468
+      - CASSANDRA_PASSWORD=SENG468-Student
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+      - CASSANDRA_BROADCAST_ADDRESS=cassandra-db
+      - CASSANDRA_STOCKS_KEYSPACE=stocks_keyspace
+      - CASSANDRA_ORDERS_KEYSPACE=orders_keyspace
     ports:
       - "9042:9042"
     volumes:
@@ -108,10 +164,11 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD", "cqlsh", "-u", "${DB_USER}", "-p", "${DB_PASSWORD}", "-e", "DESCRIBE KEYSPACES"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD", "cqlsh", "-u", "SENG468", "-p", "SENG468-Student", "-e", "DESCRIBE KEYSPACES"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
 networks:
@@ -123,3 +180,5 @@ volumes:
     name: auth-db-data
   cassandra-db-data:
     name: cassandra-db-data
+  timescale-db-data:
+    name: timescale-db-data
