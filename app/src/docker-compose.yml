@@ -90,7 +90,6 @@ services:
       - trading-network
     restart: unless-stopped
 
-    
   cassandra-db:
     image: cassandra:latest
     env_file:
@@ -114,6 +113,41 @@ services:
       retries: 5
     restart: unless-stopped
 
+  wallet-service:
+    build: 
+      context: ./wallet-portfolio
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    env_file:
+      - ./wallet-portfolio/.env
+    environment:
+      - COCKROACH_DB_HOST=${COCKROACH_DB_HOST}
+    depends_on:
+      cockroach-db:
+        condition: service_healthy
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  cockroach-db:
+    image: cockroachdb/cockroach:latest
+    command: start-single-node --insecure
+    env_file:
+      - ./wallet-portfolio/.env
+    ports:
+      - "26257:26257"
+    volumes:
+      - cockroach-db-data:/cockroach/cockroach-data
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s localhost:8080/health?ready=1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 networks:
   trading-network:
     driver: bridge
@@ -123,3 +157,5 @@ volumes:
     name: auth-db-data
   cassandra-db-data:
     name: cassandra-db-data
+  cockroach-db-data:
+    name: cockroach-db-data
