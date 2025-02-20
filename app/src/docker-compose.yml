@@ -164,11 +164,10 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD", "cqlsh", "-u", "SENG468", "-p", "SENG468-Student", "-e", "DESCRIBE KEYSPACES"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
+      test: ["CMD", "cqlsh", "-u", "${DB_USER}", "-p", "${DB_PASSWORD}", "-e", "DESCRIBE KEYSPACES"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 networks:
@@ -181,4 +180,6 @@ volumes:
   cassandra-db-data:
     name: cassandra-db-data
   timescale-db-data:
-    name: timescale-db-data
+    name: timescale-db-data  
+  cockroach-db-data:
+    name: cockroach-db-data
