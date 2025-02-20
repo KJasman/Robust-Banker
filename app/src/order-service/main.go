@@ -37,8 +37,9 @@ type Order struct {
 
 type Stock struct {
 	StockID     int       `json:"stock_id"`
-	StockName   string    `json:"name"`
+	StockName   string    `json:"stock_name"`
 	MarketPrice float64   `json:"market_price"`
+	Quantity    int       `json:"quantity"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
@@ -55,6 +56,10 @@ type User struct {
 type Response struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data"`
+}
+
+type Error struct {
+	Message string `json:"message"`
 }
 
 type CancelRequest struct {
@@ -210,82 +215,144 @@ func init() {
 // 	return 0
 // }
 
-func createStock(c *gin.Context) {
+func checkAuthorization(c *gin.Context) int {
 	userID := c.GetHeader("X-User-ID")
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
+		c.JSON(http.StatusUnauthorized, Response{Success: false, Data: Error{Message: "Unauthorized"}})
+		c.Abort()
+		return -1
 	}
+	userIDInt, err := strconv.Atoi(userID)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, Response{Success: false, Data: Error{Message: "Invalid User ID"}})
+		c.Abort()
+		return -1
+	}
+	return userIDInt
+}
 
+func checkCompanyAuthorization(c *gin.Context) int {
 	userType := c.GetHeader("X-User-Type")
 	if userType != "COMPANY" && userType == "CUSTOMER" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized - Only companies can create stocks"})
+		c.JSON(http.StatusUnauthorized, Response{Success: false, Data: Error{Message: "Unauthorized: Only Company can perform this action"}})
+		return 0
+	}
+	return 1
+}
+
+func createStock(c *gin.Context) {
+	is_authorized := checkAuthorization(c)
+	if is_authorized == -1 {
 		return
 	}
 
-	var stock struct {
-		StockName string `json:"stock_name"`
+	is_company := checkCompanyAuthorization(c)
+	if is_company == 0 {
+		return
 	}
-	if err := c.ShouldBindJSON(&stock); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	var request Stock
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Invalid request body"}})
 		return
 	}
 
-	var existingStockName int
-	err := stocksSession.Query("SELECT stock_id FROM stocks WHERE stock_name = ?", stock.StockName).Scan(&existingStockName)
-	if err == nil {
-		// Stock with this name already exists
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Stock with this name already exists"})
+	var existingStockID int
+	err := stocksSession.Query("SELECT stock_id FROM stock_lookup WHERE stock_name = ?", request.StockName).Scan(&existingStockID)
+	if err == nil && existingStockID != 0 { // stock already exists
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Stock with this name already exists"}})
 		return
 	}
 
 	var totalStocks int
 
+	// TODO: Find better way to assign stockID
 	err = stocksSession.Query("SELECT COUNT(*) FROM stocks").Scan(&totalStocks)
 	if err != nil {
 		fmt.Println("❌Error fetching total stocks:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching total stocks"})
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error fetching total stocks"}})
 		return
 	}
 	// stockID := gocql.TimeUUID()
-	var stockData Stock
-	stockData.StockID = totalStocks + 1
-	stockData.MarketPrice = 0.0
+	request.StockID = totalStocks + 1
+	request.MarketPrice = 0.0
+	request.Quantity = 0
 
 	currentTime := time.Now()
-	stockData.UpdatedAt = currentTime
+	request.UpdatedAt = currentTime
+
+	fmt.Println("-------------------", request.StockName)
+
 	err = stocksSession.Query(`
-		INSERT INTO stocks (stock_id, stock_name, market_price, updated_at)
-		VALUES (?, ?, ?, ?)`,
-		stockData.StockID,
-		stock.StockName,
-		stockData.MarketPrice,
-		stockData.UpdatedAt,
+		INSERT INTO stocks (stock_id, stock_name, quantity, market_price, updated_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		request.StockID,
+		request.StockName,
+		request.Quantity,
+		request.MarketPrice,
+		request.UpdatedAt,
 	).Exec()
 
 	if err != nil {
 		fmt.Println("❌Error inserting stock into database:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error inserting stock into database"})
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error inserting stock into database"}})
 		return
 	}
 
+	err = stocksSession.Query(`
+		INSERT INTO stock_lookup (stock_name, stock_id)
+		VALUES (?, ?)`,
+		request.StockName,
+		request.StockID,
+	).Exec()
+
+	if err != nil {
+		fmt.Println("❌Error inserting stock into lookup table:", err)
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error inserting stock into lookup table"}})
+		return
+	}
 	type StockID struct {
 		ID int `json:"stock_id"`
 	}
 
-	c.JSON(http.StatusOK, Response{Success: true, Data: StockID{ID: stockData.StockID}})
+	c.JSON(http.StatusOK, Response{Success: true, Data: StockID{ID: request.StockID}})
 }
-
-func placeOrderHandler(c *gin.Context) {
-	userID := c.GetHeader("X-User-ID")
-	fmt.Println("✅ Authorized User ID:", userID)
-	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: missing user_id"})
+func addStockToUser(c *gin.Context) {
+	is_authorized := checkAuthorization(c)
+	if is_authorized == -1 {
 		return
 	}
-	userIDint, err := strconv.Atoi(userID) // convert to int
+
+	is_company := checkCompanyAuthorization(c)
+	if is_company == 0 {
+		return
+	}
+
+	var request Stock
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Invalid request body"}})
+		return
+	}
+
+	var existingStockID int
+	err := stocksSession.Query("SELECT quantity FROM stocks WHERE stock_id = ?", request.StockID).Scan(&existingStockID)
+	if err != nil { // Stock ID does not exist
+		fmt.Println("❌ Error fetching given ID:", err)
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Invalid stock ID"}})
+		return
+	}
+
+	request.Quantity = existingStockID + request.Quantity
+	request.UpdatedAt = time.Now()
+
+	err = stocksSession.Query(`
+		UPDATE stocks_keyspace.stocks
+		SET quantity = ?, updated_at = ?
+		WHERE stock_id = ?`,
+		request.Quantity, request.UpdatedAt,
+		request.StockID).Exec()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
+		fmt.Println("❌ Error updating stock quantity:", err)
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error updating stock quantity"}})
 		return
 	}
 
@@ -295,6 +362,7 @@ func placeOrderHandler(c *gin.Context) {
 
 func placeOrderHandler(c *gin.Context) {
 	userID := checkAuthorization(c)
+
 	if userID == -1 {
 		return
 	}
@@ -303,31 +371,33 @@ func placeOrderHandler(c *gin.Context) {
 	// Parse request body
 	var request Order
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Invalid request body"}})
 		return
 	}
 
-	request.UserID = userIDint
+	request.UserID = userID
 
 	// Validate request
 	if request.Quantity <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quantity"})
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Invalid quantity"}})
 		return
 	}
+	// TODO:
+	// Check if STOCK ID exists in stocks table
+	// Check if QUANTITY is less than STOCK QUANTITY
 
 	// balance := getUserBalance(request.UserID)
-
 	// if request.Price > balance {
 	// 	c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient balance"})
 	// 	return
 	// }
 
 	if request.OrderType == "MARKET" {
-		placeMarketOrder(request, userIDint, c)
+		placeMarketOrder(request, c)
 	} else if request.OrderType == "LIMIT" {
-		placeLimitOrder(request, userIDint, c)
+		placeLimitOrder(request, c)
 	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid order type"})
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Invalid order type"}})
 	}
 }
 
@@ -360,7 +430,7 @@ func placeMarketOrder(request Order, c *gin.Context) {
 	}
 	if err != nil {
 		fmt.Println("❌ Cassandra Insert Error:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create order"})
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error placing order"}})
 		return
 	}
 	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
@@ -391,27 +461,21 @@ func placeLimitOrder(request Order, c *gin.Context) {
 		).Exec()
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create order"})
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error placing order"}})
 		return
 	}
 	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
 }
 
 func cancelLimitOrder(c *gin.Context) {
-	userID := c.GetHeader("X-User-ID")
-	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: missing user_id"})
-		return
-	}
-	userIDint, err := strconv.Atoi(userID) // convert to int
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
+	userID := checkAuthorization(c)
+	if userID == -1 {
 		return
 	}
 
 	var request CancelRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, Response{Success: false, Data: Error{Message: "Invalid request body"}})
 		return
 	}
 
@@ -426,7 +490,7 @@ func cancelLimitOrder(c *gin.Context) {
 	}
 
 	for _, query := range queries {
-		iter := ordersSession.Query(query, userIDint, request.StockTxID).Iter()
+		iter := ordersSession.Query(query, userID, request.StockTxID).Iter()
 
 		var orderID string
 		var createdAt time.Time
@@ -438,13 +502,13 @@ func cancelLimitOrder(c *gin.Context) {
 			}{OrderID: orderID, CreatedAt: createdAt})
 		}
 		if err := iter.Close(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch orders"})
+			c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error fetching order details"}})
 			return
 		}
 	}
 
 	if len(orderDetails) == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "No orders found for the given stock_tx_id"})
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "No orders of given stock_tx_id are found"}})
 		return
 	}
 
@@ -457,7 +521,7 @@ func cancelLimitOrder(c *gin.Context) {
 			now, userID, request.StockTxID, order.OrderID, order.CreatedAt).Exec()
 		if err != nil {
 			fmt.Printf("❌ Failed to cancel buy order: %s %v", order.OrderID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel order"})
+			c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error cancelling order"}})
 			return
 		}
 		err = ordersSession.Query(`
@@ -467,7 +531,7 @@ func cancelLimitOrder(c *gin.Context) {
 			now, userID, request.StockTxID, order.OrderID, order.CreatedAt).Exec()
 		if err != nil {
 			fmt.Printf("❌ Failed to cancel sell order: %s %v", order.OrderID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel order"})
+			c.JSON(http.StatusInternalServerError, Response{Success: false, Data: Error{Message: "Error cancelling order"}})
 			return
 		}
 	}
@@ -480,6 +544,8 @@ func main() {
 	r.POST("/api/v1/orders/placeStockOrder", placeOrderHandler)
 	r.POST("/api/v1/orders/cancelStockTransaction", cancelLimitOrder)
 	r.POST("/api/v1/orders/createStock", createStock)
+	r.POST("/api/v1/orders/addStockToUser", addStockToUser)
+
 	// Start server
 	port := os.Getenv("PORT")
 	if port == "" {
