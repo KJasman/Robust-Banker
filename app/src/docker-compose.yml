@@ -149,14 +149,16 @@ services:
   cassandra-db:
     image: cassandra:latest
     environment:
+      - CASSANDRA_AUTH_ENABLED=true
       - CASSANDRA_CLUSTER_NAME=trading-cluster
       - CASSANDRA_USER=SENG468
       - CASSANDRA_PASSWORD=SENG468-Student
-      - MAX_HEAP_SIZE=512M
-      - HEAP_NEWSIZE=128M
+      - MAX_HEAP_SIZE=1G  
+      - HEAP_NEWSIZE=256M  
       - CASSANDRA_BROADCAST_ADDRESS=cassandra-db
-      - CASSANDRA_STOCKS_KEYSPACE=stocks_keyspace
-      - CASSANDRA_ORDERS_KEYSPACE=orders_keyspace
+      - CASSANDRA_SEEDS=cassandra-db
+      - CASSANDRA_ENDPOINT_SNITCH=SimpleSnitch
+      - CASSANDRA_DC=datacenter1
     ports:
       - "9042:9042"
     volumes:
@@ -164,11 +166,45 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD", "cqlsh", "-u", "${DB_USER}", "-p", "${DB_PASSWORD}", "-e", "DESCRIBE KEYSPACES"]
+      test: ["CMD", "cqlsh", "-u", "${CASSANDRA_USER}", "-p", "${CASSANDRA_PASSWORD}", "-e", "DESCRIBE KEYSPACES"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+  wallet-service:
+    build: 
+      context: ./wallet-portfolio
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      - COCKROACH_DB_HOST=cockroach-db
+      - DB_USER=SENG468
+      - DB_PASSWORD=SENG468-Student
+    depends_on:
+      cockroach-db:
+        condition: service_healthy
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  cockroach-db:
+    image: cockroachdb/cockroach:latest
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257"
+    volumes:
+      - cockroach-db-data:/cockroach/cockroach-data
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s localhost:8080/health?ready=1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 
 networks:
   trading-network:
