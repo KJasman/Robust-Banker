@@ -89,8 +89,7 @@ func main() {
 	authGroup := r.Group("/authentication")
 	{
 		authProxy := newReverseProxy(services["auth"].URL, "/authentication")
-		authGroup.POST("/register/customer", authProxy)
-		authGroup.POST("/register/company", authProxy)
+		authGroup.POST("/register", authProxy)
 		authGroup.POST("/login", authProxy)
 	}
 
