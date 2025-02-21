@@ -17,7 +17,10 @@ import (
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
+		tokenHeader := c.GetHeader("token") // Jmeter case
+		var tokenString string
+
+		if authHeader == "" && tokenHeader == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "No authorization header found",
@@ -26,18 +29,23 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "Invalid token format",
-			})
-			c.Abort()
-			return
-		}
+		if authHeader != "" {
+			parts := strings.Split(authHeader, " ")
+			if len(parts) != 2 || parts[0] != "Bearer" {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"success": false,
+					"message": "Invalid Postman token format",
+				})
+				c.Abort()
+				return
+			}
 
-		tokenString := parts[1]
-		fmt.Println("Token received:", tokenString)
+			tokenString = parts[1]
+			fmt.Println("Token received:", tokenString)
+
+		} else if tokenHeader != "" { // Jmeter case
+			tokenString = tokenHeader
+		}
 
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
