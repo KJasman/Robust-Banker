@@ -25,7 +25,7 @@ var services = map[string]ServiceConfig{
 	"wallet": {URL: "http://wallet-service:8083"},
 }
 
-func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
+func newReverseProxy(targetBase, stripPrefix string) gin.HandlerFunc {
 	targetURL, err := url.Parse(targetBase)
 	if err != nil {
 		log.Fatalf("Invalid target base: %v", err)
@@ -36,23 +36,24 @@ func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		if strings.HasPrefix(req.URL.Path, stripPrefix) {
+			// Remove the prefix from the path before forwarding
 			req.URL.Path = strings.TrimPrefix(req.URL.Path, stripPrefix)
 		}
 	}
 
 	return func(c *gin.Context) {
-		// Forward user_id/user_type as X-User-ID / X-User-Type
+		// Forward user_id/user_type
 		if userID, ok := c.Get("user_id"); ok {
 			c.Request.Header.Set("X-User-ID", toString(userID))
 		}
 		if userType, ok := c.Get("user_type"); ok {
 			c.Request.Header.Set("X-User-Type", toString(userType))
 		}
-
 		proxy.ServeHTTP(c.Writer, c.Request)
 	}
 }
 
+// Helper
 func toString(val interface{}) string {
 	if s, ok := val.(string); ok {
 		return s
@@ -68,6 +69,7 @@ func main() {
 	})
 	r := gin.Default()
 
+	// Global middlewares
 	r.Use(middleware.RateLimitMiddleware(rdb))
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Frame-Options", "DENY")
@@ -80,12 +82,12 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
 	})
 
-	// Authentication endpoints (public)
-	//
-	// e.g.:
-	// POST /authentication/register/customer
-	// POST /authentication/register/company
-	// POST /authentication/login
+	//----------------------------------------------------------------
+	//  Authentication
+	//   e.g. /authentication/register/customer
+	//        /authentication/register/company
+	//        /authentication/login
+	//----------------------------------------------------------------
 	authGroup := r.Group("/authentication")
 	{
 		authProxy := newReverseProxy(services["auth"].URL, "/authentication")
@@ -94,19 +96,36 @@ func main() {
 		authGroup.POST("/login", authProxy)
 	}
 
-	// Orders endpoints (protected). E.g. GET/POST /orders/*path
-	orders := r.Group("/orders")
-	orders.Use(middleware.AuthMiddleware())
+	//----------------------------------------------------------------
+	// Setup endpoints for "createStock" & "addStockToUser"
+	//   e.g. /setup/createStock
+	//        /setup/addStockToUser
+	//----------------------------------------------------------------
+	setupGroup := r.Group("/setup")
+	setupGroup.Use(middleware.AuthMiddleware())
 	{
-		orderProxy := newReverseProxy(services["order"].URL, "/orders")
-		orders.GET("/*path", orderProxy)
-		orders.POST("/*path", orderProxy)
-		orders.PUT("/*path", orderProxy)
-		orders.DELETE("/*path", orderProxy)
+		setupProxy := newReverseProxy(services["order"].URL, "")
+		setupGroup.POST("/createStock", setupProxy)
+		setupGroup.POST("/addStockToUser", setupProxy)
 	}
 
-	// Wallet / Transaction endpoints (protected)
-	// E.g. /transaction/addMoneyToWallet, etc.
+	//----------------------------------------------------------------
+	// Engine endpoints for placing/cancelling orders
+	//   e.g. /engine/placeStockOrder
+	//        /engine/cancelStockTransaction
+	//----------------------------------------------------------------
+	engineGroup := r.Group("/engine")
+	engineGroup.Use(middleware.AuthMiddleware())
+	{
+		engineProxy := newReverseProxy(services["order"].URL, "")
+		engineGroup.POST("/placeStockOrder", engineProxy)
+		engineGroup.POST("/cancelStockTransaction", engineProxy)
+	}
+
+	//----------------------------------------------------------------
+	//  Transaction/Wallet endpoints
+	//   e.g. /transaction/addMoneyToWallet
+	//----------------------------------------------------------------
 	transaction := r.Group("/transaction")
 	transaction.Use(middleware.AuthMiddleware())
 	{
@@ -117,6 +136,9 @@ func main() {
 		transaction.GET("/getStockPortfolio", walletProxy)
 	}
 
+	//----------------------------------------------------------------
+	// Fallback for unknown routes
+	//----------------------------------------------------------------
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
