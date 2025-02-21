@@ -27,12 +27,12 @@ func NewTimescaleDBHandler() (*TimescaleDBHandler, error) {
 
 	user := os.Getenv("TIMESCALE_USER")
 	if user == "" {
-		user = "postgres"
+		user = "history_user"
 	}
 
 	password := os.Getenv("TIMESCALE_PASSWORD")
 	if password == "" {
-		password = "postgres"
+		password = "history_password"
 	}
 
 	dbname := os.Getenv("TIMESCALE_DB")
