@@ -1,29 +1,36 @@
-DROP TABLE IF EXISTS wallet_transactions;
-DROP TABLE IF EXISTS stock_portfolio;
-DROP TABLE IF EXISTS wallet;
+DROP TABLE IF EXISTS stock_portfolio CASCADE;
+DROP TABLE IF EXISTS user_wallet CASCADE;
+DROP TABLE IF EXISTS stocks CASCADE;
 
-CREATE TABLE IF NOT EXISTS wallet (
-    wallet_id VARCHAR(36) PRIMARY KEY,
-    user_id SERIAL UNIQUE NOT NULL,
-    balance DECIMAL(10, 2) NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+-- 1) Create a sequence for sequential stock IDs
+CREATE SEQUENCE IF NOT EXISTS stock_seq 
+    START WITH 1 
+    INCREMENT BY 1;
+
+-- 2) user_wallet
+CREATE TABLE IF NOT EXISTS user_wallet (
+    user_id     INT PRIMARY KEY,          -- must match the Auth DB user_id
+    balance     DECIMAL(12, 2) NOT NULL DEFAULT 0,
+    updated_at  TIMESTAMP WITH TIME ZONE DEFAULT current_timestamp
 );
 
+-- 3) stocks table uses 'stock_seq' for stock_id
+CREATE TABLE IF NOT EXISTS stocks (
+    stock_id     INT PRIMARY KEY DEFAULT nextval('stock_seq'),
+    stock_name   TEXT NOT NULL UNIQUE,
+    lowest_price DECIMAL(12,2) DEFAULT 0,
+    updated_at   TIMESTAMP WITH TIME ZONE DEFAULT current_timestamp
+);
+
+-- 4) stock_portfolio
+--   user_id + stock_id as composite PK
 CREATE TABLE IF NOT EXISTS stock_portfolio (
-    portfolio_id SERIAL PRIMARY KEY,
-    wallet_id VARCHAR(36) NOT NULL,
-    stock_id SERIAL NOT NULL,
-    quantity_owned INTEGER NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_id) REFERENCES wallet(wallet_id) ON DELETE CASCADE
-);
+    user_id        INT NOT NULL, 
+    stock_id       INT NOT NULL, 
+    quantity_owned INT NOT NULL DEFAULT 0,
+    updated_at     TIMESTAMP WITH TIME ZONE DEFAULT current_timestamp,
 
-CREATE TABLE IF NOT EXISTS wallet_transactions (
-    wallet_tx_id VARCHAR(36) PRIMARY KEY,
-    wallet_id VARCHAR(36) NOT NULL,
-    stock_tx_id VARCHAR(100),
-    is_debit BOOLEAN NOT NULL,
-    amount DECIMAL(20, 2) NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_id) REFERENCES wallet(wallet_id) ON DELETE CASCADE
+    PRIMARY KEY (user_id, stock_id),  -- composite key
+    FOREIGN KEY (user_id)  REFERENCES user_wallet(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (stock_id) REFERENCES stocks(stock_id)     ON DELETE CASCADE
 );

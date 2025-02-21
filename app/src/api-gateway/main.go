@@ -94,45 +94,48 @@ func main() {
 		authGroup.POST("/register", authProxy)
 		authGroup.POST("/login", authProxy)
 	}
-
 	//----------------------------------------------------------------
-	// Setup endpoints for "createStock" & "addStockToUser"
-	//   e.g. /setup/createStock
-	//        /setup/addStockToUser
+	// Setup endpoints
+	//   e.g. POST /setup/createStock        => wallet-portfolio service
+	//        POST /setup/addStockToUser     => order-service
 	//----------------------------------------------------------------
 	setupGroup := r.Group("/setup")
 	setupGroup.Use(middleware.AuthMiddleware())
 	{
-		setupProxy := newReverseProxy(services["order"].URL, "")
-		setupGroup.POST("/createStock", setupProxy)
-		setupGroup.POST("/addStockToUser", setupProxy)
+		// 1) createStock goes to wallet-portfolio
+		setupGroup.POST("/createStock", newReverseProxy(services["wallet"].URL, "/setup"))
+
+		// 2) addStockToUser goes to order-service
+		setupGroup.POST("/addStockToUser", newReverseProxy(services["order"].URL, "/setup"))
 	}
 
 	//----------------------------------------------------------------
-	// Engine endpoints for placing/cancelling orders
-	//   e.g. /engine/placeStockOrder
-	//        /engine/cancelStockTransaction
+	// Engine endpoints
+	//   e.g. POST /engine/placeStockOrder
+	//        POST /engine/cancelStockTransaction
 	//----------------------------------------------------------------
 	engineGroup := r.Group("/engine")
 	engineGroup.Use(middleware.AuthMiddleware())
 	{
-		engineProxy := newReverseProxy(services["order"].URL, "")
+		engineProxy := newReverseProxy(services["order"].URL, "/engine")
 		engineGroup.POST("/placeStockOrder", engineProxy)
 		engineGroup.POST("/cancelStockTransaction", engineProxy)
 	}
 
 	//----------------------------------------------------------------
-	//  Transaction/Wallet endpoints
+	// Transaction/Wallet endpoints
 	//   e.g. /transaction/addMoneyToWallet
+	//        /transaction/getWalletBalance
+	//        /transaction/getStockPortfolio
 	//----------------------------------------------------------------
-	transaction := r.Group("/transaction")
-	transaction.Use(middleware.AuthMiddleware())
+	transactionGroup := r.Group("/transaction")
+	transactionGroup.Use(middleware.AuthMiddleware())
 	{
 		walletProxy := newReverseProxy(services["wallet"].URL, "/transaction")
-		transaction.POST("/addMoneyToWallet", walletProxy)
-		transaction.GET("/getWalletBalance", walletProxy)
-		transaction.GET("/getWalletTransactions", walletProxy)
-		transaction.GET("/getStockPortfolio", walletProxy)
+		transactionGroup.POST("/addMoneyToWallet", walletProxy)
+		transactionGroup.GET("/getWalletBalance", walletProxy)
+		transactionGroup.GET("/getStockPortfolio", walletProxy)
+
 	}
 
 	//----------------------------------------------------------------

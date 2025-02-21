@@ -5,16 +5,20 @@
 # We are aware of the security implications of environment variable
 # instantiation in a docker compose file, however as this is an 
 # academic project, this is more convenient.
+
 services:
+  # -------------------------------------------------------
+  # 1) API Gateway
+  # -------------------------------------------------------
   api-gateway:
-    build: 
+    build:
       context: ./api-gateway
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
       - PORT=8000
-      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
+      - JWT_SECRET=eyJhbGciOiJIUzI1Ni...
       - RATE_LIMIT=100
       - RATE_LIMIT_WINDOW=10000
     depends_on:
@@ -24,6 +28,9 @@ services:
       - trading-network
     restart: unless-stopped
 
+  # -------------------------------------------------------
+  # 2) Redis
+  # -------------------------------------------------------
   redis:
     image: redis:alpine
     ports:
@@ -37,15 +44,18 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # -------------------------------------------------------
+  # 3) Authentication service + DB
+  # -------------------------------------------------------
   auth-service:
-    build: 
+    build:
       context: ./authentication
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
     environment:
       - PORT=8080
-      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
+      - JWT_SECRET=eyJhbGciOiJIUzI1Ni...
       - DB_HOST=auth-db
       - DB_PORT=5432
       - DB_USER=SENG468
@@ -78,8 +88,11 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # -------------------------------------------------------
+  # 4) Order-History + TimescaleDB
+  # -------------------------------------------------------
   order-history-service:
-    build: 
+    build:
       context: ./order-history
       dockerfile: Dockerfile
     ports:
@@ -91,7 +104,7 @@ services:
       - DB_USER=history_user
       - DB_PASSWORD=history_password
       - TIMESCALE_DB=order_history
-      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
+      - JWT_SECRET=eyJhbGciOiJIUzI1Ni...
     depends_on:
       timescale-db:
         condition: service_healthy
@@ -106,7 +119,7 @@ services:
       POSTGRES_PASSWORD: history_password
       POSTGRES_DB: order_history
     ports:
-      - "5433:5432"  # Map host 5433 to container 5432
+      - "5433:5432"  # Map host 5433 -> container 5432; otherwise conflicts
     volumes:
       - timescale-db-data:/var/lib/postgresql/data
       - ./order-history/migrations:/docker-entrypoint-initdb.d
@@ -119,6 +132,9 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # -------------------------------------------------------
+  # 5) Order-Service (Cassandra + Redis)
+  # -------------------------------------------------------
   order-service:
     build:
       context: ./order-service
@@ -127,9 +143,11 @@ services:
       - "8081:8081"
     environment:
       - PORT=8081
-      - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
+      - JWT_SECRET=eyJhbGciOiJIUzI1Ni...
       - RATE_LIMIT=100
       - RATE_LIMIT_WINDOW=10000
+
+      # Cassandra
       - CASSANDRA_DB_HOST=cassandra-db
       - CASSANDRA_DB_PORT=9042
       - CASSANDRA_STOCKS_KEYSPACE=stocks_keyspace
@@ -138,21 +156,29 @@ services:
       - DB_PASSWORD=SENG468-Student
       - DB_NAME=user-login
       - DB_SSLMODE=disable
-      - CASSANDRA_DB_HOST=cassandra-db
+
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_ORDER_CHANNEL=new-orders
     depends_on:
       cassandra-db:
         condition: service_healthy
+      init-cassandra:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
     networks:
       - trading-network
     restart: unless-stopped
-    
+
   cassandra-db:
     image: cassandra:latest
     environment:
       - CASSANDRA_AUTH_ENABLED=true
       - CASSANDRA_CLUSTER_NAME=trading-cluster
       - DB_USER=SENG468
-      - DB_PASSWORD=SENG468-Student # Hardcoded below for healthcheck
+      - DB_PASSWORD=SENG468-Student
       - MAX_HEAP_SIZE=1G  
       - HEAP_NEWSIZE=256M  
       - CASSANDRA_BROADCAST_ADDRESS=cassandra-db
@@ -172,19 +198,39 @@ services:
       retries: 10
     restart: unless-stopped
 
+  init-cassandra:
+    image: cassandra:latest
+    depends_on:
+      cassandra-db:
+        condition: service_healthy
+    volumes:
+      - ./order-service/migrations/schema.cql:/schema.cql
+    entrypoint: [
+      "bash", "-c",
+      "sleep 5 && cqlsh -u SENG468 -p SENG468-Student cassandra-db -f /schema.cql"
+    ]
+    networks:
+      - trading-network
+    restart: "no"
+  # -------------------------------------------------------
+  # 6) Wallet-Service (Cockroach)
+  # -------------------------------------------------------
   wallet-service:
-    build: 
+    build:
       context: ./wallet-portfolio
       dockerfile: Dockerfile
     ports:
       - "8083:8083"
     environment:
+      - PORT=8083
       - COCKROACH_DB_HOST=cockroach-db
-      - DB_USER=SENG468
-      - DB_PASSWORD=SENG468-Student
+      - DB_USER=root
+      - DB_PASSWORD=SENG468-
     depends_on:
       cockroach-db:
         condition: service_healthy
+      init-cockroach:
+        condition: service_completed_successfully
     networks:
       - trading-network
     restart: unless-stopped
@@ -205,7 +251,45 @@ services:
       retries: 5
     restart: unless-stopped
 
+  init-cockroach:
+    image: cockroachdb/cockroach:latest
+    depends_on:
+      cockroach-db:
+        condition: service_healthy
+    volumes:
+      - ./wallet-portfolio/migrations:/migrations
+    entrypoint: ["bash","-c","sleep 5 && cockroach sql --insecure --host=cockroach-db:26257 -f /migrations/portfolio_table.sql"]
+    networks:
+      - trading-network
+    restart: "no"
 
+  # -------------------------------------------------------
+  # 7) Matching-Service 
+  # -------------------------------------------------------
+  matching-service:
+    build:
+      context: ./matching-service
+      dockerfile: Dockerfile
+    ports:
+      - "8084:8084"
+    environment:
+      - PORT=8084
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_ORDER_CHANNEL=new-orders
+      - WALLET_PORTFOLIO_URL=http://wallet-service:8083
+      - ORDER_HISTORY_URL=http://order-history-service:8082
+    depends_on:
+      - redis
+      - wallet-service
+      - order-history-service
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+# -------------------------------------------------------------------
+# Networks + Volumes
+# -------------------------------------------------------------------
 networks:
   trading-network:
     driver: bridge

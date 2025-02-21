@@ -4,351 +4,434 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
+	"github.com/gorilla/mux"
+	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver
 )
 
-// -----------------------------------------------------------------------------
-// NullString - custom type to store NULL as null in JSON
-// -----------------------------------------------------------------------------
-type NullString struct {
-	sql.NullString
-}
-
-// MarshalJSON ensures if Valid == false, we get "null" in the final JSON.
-func (ns NullString) MarshalJSON() ([]byte, error) {
-	if !ns.Valid {
-		return []byte("null"), nil
-	}
-	return json.Marshal(ns.String)
-}
-
-// -----------------------------------------------------------------------------
-// Data Models
-// -----------------------------------------------------------------------------
-
-type WalletTransaction struct {
-	WalletTxID string     `json:"wallet_tx_id"`
-	StockTxID  NullString `json:"stock_tx_id"` // can be NULL in DB
-	IsDebit    bool       `json:"is_debit"`
-	Amount     float64    `json:"amount"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-}
-
-type StockPortfolioItem struct {
-	StockID       int       `json:"stock_id"`
-	QuantityOwned int       `json:"quantity_owned"`
-	UpdatedAt     time.Time `json:"updated_at"`
-}
-
-// Response is a generic success/data/message JSON response wrapper.
-type Response struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data"`
-	Message string      `json:"message,omitempty"`
-}
-
-// -----------------------------------------------------------------------------
-// Globals & DB Setup
-// -----------------------------------------------------------------------------
-
-var portfolioDB *sql.DB
-
-func initDB() error {
-	dsn := "postgresql://root@cockroach-db:26257/?sslmode=disable"
-	db, err := sql.Open("postgres", dsn)
+// ---------------------------------------------------------------------
+// MAIN
+// ---------------------------------------------------------------------
+func main() {
+	// 1) Connect to CockroachDB
+	db, err := connectDB()
 	if err != nil {
-		return fmt.Errorf("error opening DB: %v", err)
+		log.Fatalf("Failed to connect to DB: %v", err)
 	}
 	defer db.Close()
 
-	_, err = db.Exec(`CREATE DATABASE IF NOT EXISTS "portfolio-db";`)
-	if err != nil {
-		return fmt.Errorf("error creating 'portfolio-db': %v", err)
-	}
+	// 2) Set up routes
+	r := mux.NewRouter()
 
-	dsn = "postgresql://root@cockroach-db:26257/portfolio-db?sslmode=disable"
-	portfolioDB, err = sql.Open("postgres", dsn)
-	if err != nil {
-		return fmt.Errorf("error connecting to 'portfolio-db': %v", err)
-	}
-	if err = portfolioDB.Ping(); err != nil {
-		portfolioDB.Close()
-		return fmt.Errorf("error pinging 'portfolio-db': %v", err)
-	}
+	// Transaction endpoints
+	r.HandleFunc("/addMoneyToWallet", addMoneyToWallet(db)).Methods("POST")
+	r.HandleFunc("/getWalletBalance", getWalletBalance(db)).Methods("GET")
+	r.HandleFunc("/getStockPortfolio", getStockPortfolio(db)).Methods("GET")
+	r.HandleFunc("/getStockPrices", getStockPrices(db)).Methods("GET")
 
-	return applyMigrations(portfolioDB)
-}
+	// Setup endpoint (createStock uses sequence-based stock_id)
+	r.HandleFunc("/createStock", createStock(db)).Methods("POST")
 
-func applyMigrations(db *sql.DB) error {
-	content, err := os.ReadFile("migrations/portfolio_table.sql")
-	if err != nil {
-		return fmt.Errorf("failed reading migration file: %w", err)
-	}
-	if _, err := db.Exec(string(content)); err != nil {
-		return fmt.Errorf("failed to apply migrations: %w", err)
-	}
-	log.Println("✅ Migrations applied successfully.")
-	return nil
-}
+	// Health check
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"wallet-portfolio OK"}`))
+	}).Methods("GET")
 
-func init() {
-	_ = godotenv.Load()
-	if err := initDB(); err != nil {
-		log.Fatalf("Could not init DB: %v", err)
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-func checkAuthorization(c *gin.Context) int {
-	userIDStr := c.GetHeader("X-User-ID")
-	if userIDStr == "" {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    nil,
-			Message: "Unauthorized (missing X-User-ID header)",
-		})
-		c.Abort()
-		return -1
-	}
-	userID, err := strconv.Atoi(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    nil,
-			Message: "Invalid X-User-ID header",
-		})
-		c.Abort()
-		return -1
-	}
-	return userID
-}
-
-func createWalletIfNotExists(userID int) (string, error) {
-	var walletID string
-	err := portfolioDB.QueryRow(`SELECT wallet_id FROM wallet WHERE user_id=$1`, userID).Scan(&walletID)
-	if err == sql.ErrNoRows {
-		walletID = uuid.NewString()
-		_, err = portfolioDB.Exec(`
-			INSERT INTO wallet (wallet_id, user_id, balance) VALUES ($1, $2, 0)
-		`, walletID, userID)
-		if err != nil {
-			return "", err
-		}
-		return walletID, nil
-	} else if err != nil {
-		return "", err
-	}
-	return walletID, nil
-}
-
-// -----------------------------------------------------------------------------
-// Handlers
-// -----------------------------------------------------------------------------
-
-func addMoneyHandler(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
-		return
-	}
-	var req struct {
-		Amount float64 `json:"amount"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Message: "Invalid request body"})
-		return
-	}
-	if req.Amount <= 0 {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Message: "Amount must be > 0"})
-		return
-	}
-
-	walletID, err := createWalletIfNotExists(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Failed to create/fetch wallet"})
-		return
-	}
-
-	tx, err := portfolioDB.BeginTx(c, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "DB transaction error"})
-		return
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(c,
-		`UPDATE wallet
-         SET balance = balance + $1,
-             updated_at = current_timestamp
-         WHERE wallet_id = $2`,
-		req.Amount, walletID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Failed to update balance"})
-		return
-	}
-
-	walletTxID := uuid.NewString()
-	_, err = tx.ExecContext(c,
-		`INSERT INTO wallet_transactions (wallet_tx_id, wallet_id, is_debit, amount)
-         VALUES ($1, $2, false, $3)`,
-		walletTxID, walletID, req.Amount)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Failed to log transaction"})
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Failed to commit transaction"})
-		return
-	}
-
-	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
-}
-
-func getWalletBalanceHandler(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
-		return
-	}
-
-	walletID, err := createWalletIfNotExists(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Failed to create/fetch wallet"})
-		return
-	}
-
-	var balance float64
-	err = portfolioDB.QueryRowContext(c,
-		`SELECT balance FROM wallet WHERE wallet_id=$1`, walletID).Scan(&balance)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Message: "Error reading balance",
-		})
-		return
-	}
-
-	type Bal struct {
-		Balance float64 `json:"balance"`
-	}
-	c.JSON(http.StatusOK, Response{Success: true, Data: Bal{Balance: balance}})
-}
-
-func getWalletTransactionsHandler(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
-		return
-	}
-
-	walletID, err := createWalletIfNotExists(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Message: "Failed to create/fetch wallet",
-		})
-		return
-	}
-
-	rows, err := portfolioDB.QueryContext(c,
-		`SELECT wallet_tx_id, stock_tx_id, is_debit, amount, updated_at
-         FROM wallet_transactions
-         WHERE wallet_id=$1
-         ORDER BY updated_at DESC`, walletID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Message: "Error querying transactions",
-		})
-		return
-	}
-	defer rows.Close()
-
-	var txs []WalletTransaction
-	for rows.Next() {
-		var t WalletTransaction
-		if scanErr := rows.Scan(
-			&t.WalletTxID,
-			&t.StockTxID.NullString, // store the underlying NullString
-			&t.IsDebit,
-			&t.Amount,
-			&t.UpdatedAt,
-		); scanErr != nil {
-			c.JSON(http.StatusInternalServerError, Response{
-				Success: false, Message: "Error scanning transactions",
-			})
-			return
-		}
-		txs = append(txs, t)
-	}
-
-	c.JSON(http.StatusOK, Response{Success: true, Data: txs})
-}
-
-func getStockPortfolioHandler(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
-		return
-	}
-
-	walletID, err := createWalletIfNotExists(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Message: "Failed to create/fetch wallet",
-		})
-		return
-	}
-
-	rows, err := portfolioDB.QueryContext(c,
-		`SELECT stock_id, quantity_owned, updated_at
-		 FROM stock_portfolio
-		 WHERE wallet_id=$1
-		 ORDER BY stock_id ASC`, walletID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Message: "Error querying portfolio",
-		})
-		return
-	}
-	defer rows.Close()
-
-	var items []StockPortfolioItem
-	for rows.Next() {
-		var spi StockPortfolioItem
-		if scanErr := rows.Scan(&spi.StockID, &spi.QuantityOwned, &spi.UpdatedAt); scanErr != nil {
-			c.JSON(http.StatusInternalServerError, Response{
-				Success: false, Message: "Error scanning portfolio row",
-			})
-			return
-		}
-		items = append(items, spi)
-	}
-	c.JSON(http.StatusOK, Response{Success: true, Data: items})
-}
-
-func main() {
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
-
-	r.POST("/addMoneyToWallet", addMoneyHandler)
-	r.GET("/getWalletBalance", getWalletBalanceHandler)
-	r.GET("/getWalletTransactions", getWalletTransactionsHandler)
-	r.GET("/getStockPortfolio", getStockPortfolioHandler)
-
+	// 3) Start server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8083"
 	}
-	log.Printf("Wallet-Portfolio service listening on port %s", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal(err)
+	log.Printf("Wallet-Portfolio service is listening on port %s...", port)
+	if err := http.ListenAndServe(":"+port, r); err != nil {
+		log.Fatalf("ListenAndServe error: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------
+// DB CONNECTION
+// ---------------------------------------------------------------------
+func connectDB() (*sql.DB, error) {
+	host := getEnvOrDefault("COCKROACH_DB_HOST", "localhost")
+	port := getEnvOrDefault("DB_PORT", "26257")
+	user := getEnvOrDefault("DB_USER", "root")
+	pass := os.Getenv("DB_PASSWORD")
+	dbName := getEnvOrDefault("DB_NAME", "defaultdb")
+
+	// Example DSN => "postgresql://user:pass@host:26257/dbname?sslmode=disable"
+	dsn := fmt.Sprintf("postgresql://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, dbName)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ping with some retry
+	if err := pingWithRetry(db, 5); err != nil {
+		return nil, fmt.Errorf("unable to connect after retries: %w", err)
+	}
+	log.Println("Connected to CockroachDB successfully.")
+
+	return db, nil
+}
+
+func pingWithRetry(db *sql.DB, attempts int) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		err = db.Ping()
+		if err == nil {
+			return nil
+		}
+		log.Printf("DB ping failed (attempt %d/%d): %v", i+1, attempts, err)
+		time.Sleep(2 * time.Second)
+	}
+	return err
+}
+
+func getEnvOrDefault(key, defVal string) string {
+	val := os.Getenv(key)
+	if val == "" {
+		return defVal
+	}
+	return val
+}
+
+// ---------------------------------------------------------------------
+// HANDLERS (ENDPOINTS)
+// ---------------------------------------------------------------------
+
+type apiResponse struct {
+	Success bool        `json:"success"`
+	Data    interface{} `json:"data,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
+
+// 1) POST /addMoneyToWallet
+// Body: { "amount": 10000 }
+func addMoneyToWallet(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, apiResponse{Success: false, Error: "Method not allowed"})
+			return
+		}
+
+		userID, err := getUserID(r)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		var body struct {
+			Amount float64 `json:"amount"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid JSON"})
+			return
+		}
+		if body.Amount <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Amount must be positive"})
+			return
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+		defer tx.Rollback()
+
+		_, err = tx.Exec(`
+            INSERT INTO user_wallet (user_id, balance)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE
+              SET balance = user_wallet.balance + EXCLUDED.balance,
+                  updated_at = NOW()
+        `, userID, body.Amount)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: nil})
+	}
+}
+
+// 2) POST /createStock
+// Insert a row into `stocks` with `DEFAULT nextval('stock_seq')` for stock_id
+func createStock(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, apiResponse{Success: false, Error: "Method not allowed"})
+			return
+		}
+
+		var body struct {
+			StockName string `json:"stock_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid JSON"})
+			return
+		}
+		if body.StockName == "" {
+			writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Missing stock_name"})
+			return
+		}
+
+		var newStockID int
+		err := db.QueryRow(`
+            INSERT INTO stocks (stock_name)
+            VALUES ($1)
+            RETURNING stock_id
+        `, body.StockName).Scan(&newStockID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		resp := map[string]interface{}{
+			"stock_id": newStockID,
+		}
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: resp})
+	}
+}
+
+// 3) GET /getStockPortfolio
+func getStockPortfolio(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, apiResponse{Success: false, Error: "Method not allowed"})
+			return
+		}
+
+		userID, err := getUserID(r)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		rows, err := db.Query(`
+            SELECT sp.stock_id, s.stock_name, sp.quantity_owned
+            FROM stock_portfolio sp
+            JOIN stocks s ON sp.stock_id = s.stock_id
+            WHERE sp.user_id = $1
+            ORDER BY s.stock_name
+        `, userID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		var portfolio []map[string]interface{}
+		for rows.Next() {
+			var stockID, quantity int
+			var stockName string
+			if err := rows.Scan(&stockID, &stockName, &quantity); err != nil {
+				writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+				return
+			}
+			item := map[string]interface{}{
+				"stock_id":       stockID,
+				"stock_name":     stockName,
+				"quantity_owned": quantity,
+			}
+			portfolio = append(portfolio, item)
+		}
+
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: portfolio})
+	}
+}
+
+// 4) GET /getWalletBalance
+func getWalletBalance(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, apiResponse{Success: false, Error: "Method not allowed"})
+			return
+		}
+
+		userID, err := getUserID(r)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		var balance float64
+		err = db.QueryRow(`SELECT balance FROM user_wallet WHERE user_id = $1`, userID).Scan(&balance)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, apiResponse{Success: false, Error: "No wallet for this user"})
+			return
+		} else if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, apiResponse{
+			Success: true,
+			Data: map[string]interface{}{
+				"balance": balance,
+			},
+		})
+	}
+}
+
+// 5) GET /getStockPrices
+func getStockPrices(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, apiResponse{Success: false, Error: "Method not allowed"})
+			return
+		}
+
+		userID, err := getUserID(r)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		rows, err := db.Query(`
+            SELECT sp.stock_id, s.stock_name
+            FROM stock_portfolio sp
+            JOIN stocks s ON sp.stock_id = s.stock_id
+            WHERE sp.user_id = $1
+            ORDER BY s.stock_name
+        `, userID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		var stockIDs []int
+		var portfolioData []map[string]interface{}
+		for rows.Next() {
+			var stockID int
+			var stockName string
+			if err := rows.Scan(&stockID, &stockName); err != nil {
+				writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+				return
+			}
+			portfolioData = append(portfolioData, map[string]interface{}{
+				"stock_id":   stockID,
+				"stock_name": stockName,
+			})
+			stockIDs = append(stockIDs, stockID)
+		}
+
+		if len(stockIDs) == 0 {
+			writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: []interface{}{}})
+			return
+		}
+
+		lowestPrices, err := fetchLowestSellingPricesFromOrderService(stockIDs)
+		if err != nil {
+			log.Printf("Error fetching lowest prices: %v", err)
+			writeJSON(w, http.StatusBadGateway, apiResponse{Success: false, Error: "Could not retrieve lowest prices"})
+			return
+		}
+
+		priceMap := make(map[int]float64)
+		for _, item := range lowestPrices {
+			sid := int(item["stock_id"].(float64))
+			price := item["current_lowest_price"].(float64)
+			priceMap[sid] = price
+		}
+
+		var result []map[string]interface{}
+		for _, p := range portfolioData {
+			sid := p["stock_id"].(int)
+			lowestP, ok := priceMap[sid]
+			if !ok {
+				lowestP = 0
+			}
+			result = append(result, map[string]interface{}{
+				"stock_id":             sid,
+				"stock_name":           p["stock_name"],
+				"current_lowest_price": lowestP,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: result})
+	}
+}
+
+// ---------------------------------------------------------------------
+// HELPER FUNCTIONS
+// ---------------------------------------------------------------------
+
+func getUserID(r *http.Request) (int, error) {
+	uidStr := r.Header.Get("X-User-ID")
+	if uidStr == "" {
+		return 0, fmt.Errorf("missing X-User-ID header")
+	}
+	uid, err := strconv.Atoi(uidStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid user ID")
+	}
+	return uid, nil
+}
+
+func fetchLowestSellingPricesFromOrderService(stockIDs []int) ([]map[string]interface{}, error) {
+	type requestBody struct {
+		StockIDs []int `json:"stock_ids"`
+	}
+	reqPayload := requestBody{StockIDs: stockIDs}
+	jsonBody, _ := json.Marshal(reqPayload)
+
+	url := "http://order-service:8081/engine/getLowestSellingPrices"
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("order-service returned %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var respData struct {
+		Success bool          `json:"success"`
+		Data    []interface{} `json:"data"`
+		Error   string        `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
+		return nil, err
+	}
+	if !respData.Success {
+		return nil, fmt.Errorf("order-service error: %s", respData.Error)
+	}
+
+	var result []map[string]interface{}
+	for _, raw := range respData.Data {
+		if m, ok := raw.(map[string]interface{}); ok {
+			result = append(result, m)
+		}
+	}
+	return result, nil
+}
+
+func writeJSON(w http.ResponseWriter, code int, resp apiResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(resp)
 }

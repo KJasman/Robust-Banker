@@ -1,21 +1,19 @@
+# Dockerfile for wallet-portfolio
 FROM golang:1.22-alpine
 
 WORKDIR /app
 
-# Copy go mod and sum files
+# 1) Copy go.mod and go.sum first to leverage Docker cache
 COPY go.mod go.sum ./
-
-# Download all dependencies
 RUN go mod download
 
-# Copy the source code
+# 2) Copy the rest of the source code (including migrations folder)
 COPY . .
 
-# Build the application
+# 3) Build your Go application (producing 'main' binary)
 RUN go build -o main .
 
-# Expose port 8080
-EXPOSE 8080
+EXPOSE 8083
 
-# Command to run the application
+# 5) Set the default command to run your compiled binary
 CMD ["./main"]

@@ -1,617 +1,497 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/gocql/gocql"
-	"github.com/joho/godotenv"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 )
-
-// NullString is a custom type to store possibly-NULL strings from Cassandra
-// and produce "null" in JSON if Valid=false.
-type NullString struct {
-	String string
-	Valid  bool
-}
-
-func (ns NullString) MarshalJSON() ([]byte, error) {
-	if !ns.Valid {
-		return []byte("null"), nil
-	}
-	return json.Marshal(ns.String)
-}
-
-func (ns *NullString) ScanCQL(value interface{}) {
-	if value == nil {
-		ns.String, ns.Valid = "", false
-	} else {
-		ns.String = value.(string)
-		ns.Valid = true
-	}
-}
-
-// Order type with some fields as NullString so Cassandra can store null
-type Order struct {
-	StockID         int        `json:"stock_id"`
-	StockTxID       string     `json:"stock_tx_id"`
-	ParentStockTxID NullString `json:"parent_stock_tx_id"`
-	WalletTxID      NullString `json:"wallet_tx_id"`
-	UserID          int        `json:"user_id"`
-	StockData       Stock      `json:"stock_data"`
-	OrderType       string     `json:"order_type"`
-	IsBuy           bool       `json:"is_buy"`
-	Quantity        int        `json:"quantity"`
-	Price           float64    `json:"price"`
-	Status          NullString `json:"order_status"`
-	Created         time.Time  `json:"created"`
-}
-
-type Stock struct {
-	StockID     int       `json:"stock_id"`
-	StockName   string    `json:"stock_name"`
-	MarketPrice float64   `json:"market_price"`
-	Quantity    int       `json:"quantity"`
-	UpdatedAt   time.Time `json:"updated_at"`
-}
-
-type Response struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data"`
-}
-
-type Error struct {
-	Message string `json:"message"`
-}
 
 var (
-	ordersSession *gocql.Session
-	stocksSession *gocql.Session
+	cassandraSession  *gocql.Session
+	redisClient       *redis.Client
+	redisOrderChannel string
 )
 
-// Just a test to confirm we can query from the orders keyspace
-func testCassandraConnection() {
-	var count int
-	err := ordersSession.Query("SELECT COUNT(*) FROM orders_keyspace.market_buy").Scan(&count)
+type apiResponse struct {
+	Success bool        `json:"success"`
+	Data    interface{} `json:"data,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
+
+func main() {
+	var err error
+
+	// 1) Connect to Cassandra
+	cassandraSession, err = connectCassandra()
 	if err != nil {
-		fmt.Println("❌ Cassandra Connection Issue:", err)
-	} else {
-		fmt.Println("✅ Cassandra is working! Orders Count (market_buy):", count)
+		log.Fatalf("Failed to connect to Cassandra: %v", err)
+	}
+	defer cassandraSession.Close()
+
+	// 2) Run migrations
+	if err := migrateCassandra(cassandraSession, "./migrations/schema.cql"); err != nil {
+		log.Fatalf("Failed to run Cassandra migrations: %v", err)
+	}
+	log.Println("Cassandra migrations applied successfully.")
+
+	// 3) Connect to Redis
+	redisClient, err = connectRedis()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	defer redisClient.Close()
+
+	// 4) Load environment
+	redisOrderChannel = getEnv("REDIS_ORDER_CHANNEL", "new-orders")
+	port := getEnv("PORT", "8081")
+
+	// 5) Setup HTTP routes
+	r := mux.NewRouter()
+	r.HandleFunc("/addStockToUser", addStockToUserHandler).Methods("POST")
+	r.HandleFunc("/placeStockOrder", placeStockOrderHandler).Methods("POST")
+	r.HandleFunc("/cancelStockTransaction", cancelStockTransactionHandler).Methods("POST")
+	r.HandleFunc("/getLowestSellingPrices", getLowestSellingPricesHandler).Methods("POST")
+
+	// Health check
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"order-service OK"}`))
+	}).Methods("GET")
+
+	log.Printf("Order-service listening on port %s", port)
+	if err := http.ListenAndServe(":"+port, r); err != nil {
+		log.Fatalf("Error in ListenAndServe: %v", err)
 	}
 }
 
-// initDB creates/ensures both keyspaces exist, then opens two sessions,
-// one pointing to the stocks keyspace and another to the orders keyspace.
-func initDB() error {
-	cluster := gocql.NewCluster(os.Getenv("CASSANDRA_DB_HOST"))
+// ----------------------------------------------------------------------------
+// CONNECT CASSANDRA
+// ----------------------------------------------------------------------------
+func connectCassandra() (*gocql.Session, error) {
+	cassHost := getEnv("CASSANDRA_DB_HOST", "localhost")
+	cassPort := getEnv("CASSANDRA_DB_PORT", "9042")
+	ordersKeyspace := getEnv("CASSANDRA_ORDERS_KEYSPACE", "orders_keyspace")
 
-	portStr := os.Getenv("CASSANDRA_DB_PORT")
-	if portStr == "" {
-		portStr = "9042"
+	cluster := gocql.NewCluster(cassHost)
+	if p, err := strconv.Atoi(cassPort); err == nil {
+		cluster.Port = p
 	}
-	portNum, _ := strconv.Atoi(portStr)
-	cluster.Port = portNum
+	cluster.Keyspace = ordersKeyspace
 
-	// We temporarily connect without specifying a keyspace, so we can CREATE it if needed.
-	cluster.Keyspace = ""
-	cluster.Authenticator = gocql.PasswordAuthenticator{
-		Username: os.Getenv("DB_USER"),
-		Password: os.Getenv("DB_PASSWORD"),
-	}
-	cluster.Consistency = gocql.One
-
-	tempSession, err := cluster.CreateSession()
+	session, err := cluster.CreateSession()
 	if err != nil {
-		return fmt.Errorf("❌ error connecting to Cassandra initially: %v", err)
-	}
-	defer tempSession.Close()
-
-	// Ensure orders_keyspace
-	err = tempSession.Query(`
-        CREATE KEYSPACE IF NOT EXISTS orders_keyspace
-        WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
-    `).Exec()
-	if err != nil {
-		return fmt.Errorf("❌ error creating orders_keyspace: %v", err)
+		return nil, err
 	}
 
-	// Ensure stocks_keyspace
-	err = tempSession.Query(`
-        CREATE KEYSPACE IF NOT EXISTS stocks_keyspace
-        WITH replication = {'class': 'NetworkTopologyStrategy', 'datacenter1': 1}
-    `).Exec()
-	if err != nil {
-		return fmt.Errorf("❌ error creating stocks_keyspace: %v", err)
+	// Quick test query
+	if err := session.Query(`SELECT now() FROM system.local`).Exec(); err != nil {
+		return nil, fmt.Errorf("Cassandra ping failed: %w", err)
 	}
 
-	fmt.Println("✅ Keyspaces verified or created successfully!")
-
-	// Now connect for the stocks keyspace
-	stocksCluster := *cluster
-	stocksCluster.Keyspace = os.Getenv("CASSANDRA_DB_STOCKS_KEYSPACE") // typically "stocks_keyspace"
-	stocksSession, err = stocksCluster.CreateSession()
-	if err != nil {
-		return fmt.Errorf("❌ error connecting to Cassandra stocks keyspace: %v", err)
-	}
-	fmt.Println("✅ Connected to stocks keyspace successfully!")
-
-	// Connect for the orders keyspace
-	ordersCluster := *cluster
-	ordersCluster.Keyspace = os.Getenv("CASSANDRA_DB_ORDERS_KEYSPACE") // typically "orders_keyspace"
-	ordersSession, err = ordersCluster.CreateSession()
-	if err != nil {
-		return fmt.Errorf("❌ error connecting to Cassandra orders keyspace: %v", err)
-	}
-	fmt.Println("✅ Connected to orders keyspace successfully!")
-
-	return applyMigrations()
+	log.Printf("Connected to Cassandra (default keyspace: %s, host: %s)", ordersKeyspace, cassHost)
+	return session, nil
 }
 
-// applyMigrations runs the two .cql files against the correct sessions.
-func applyMigrations() error {
-	// 1) Migrate the orders keyspace tables
-	csd1 := "migrations/001_active_order_table.cql"
-	migration, err := os.ReadFile(csd1)
+// ----------------------------------------------------------------------------
+// MIGRATE CASSANDRA
+// ----------------------------------------------------------------------------
+func migrateCassandra(session *gocql.Session, cqlFile string) error {
+	absPath, err := filepath.Abs(cqlFile)
 	if err != nil {
-		return fmt.Errorf("error reading migration file %s: %v", csd1, err)
-	}
-	migrationQueries := strings.Split(string(migration), ";")
-	for _, query := range migrationQueries {
-		query = strings.TrimSpace(query)
-		if query != "" {
-			if err := ordersSession.Query(query).Exec(); err != nil {
-				return fmt.Errorf("❌error applying migration %s: %v", csd1, err)
-			}
-		}
-	}
-	log.Printf("✅ Migration %s applied successfully\n", csd1)
-
-	// 2) Migrate the stocks keyspace tables
-	csd2 := "migrations/002_stock_table.cql"
-	migration, err = os.ReadFile(csd2)
-	if err != nil {
-		return fmt.Errorf("error reading migration file %s: %v", csd2, err)
-	}
-	migrationQueries = strings.Split(string(migration), ";")
-	for _, query := range migrationQueries {
-		query = strings.TrimSpace(query)
-		if query != "" {
-			if err := stocksSession.Query(query).Exec(); err != nil {
-				return fmt.Errorf("❌error applying migration %s: %v", csd2, err)
-			}
-		}
+		return fmt.Errorf("unable to get absolute path for migrations file: %v", err)
 	}
 
-	// Just to test we can query from the orders keyspace:
-	testCassandraConnection()
+	f, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %v", absPath, err)
+	}
+	defer f.Close()
+
+	content, err := io.ReadAll(f)
+	if err != nil {
+		return fmt.Errorf("failed to read cql file: %v", err)
+	}
+
+	statements := strings.Split(string(content), ";")
+	for _, stmt := range statements {
+		clean := strings.TrimSpace(stmt)
+		if clean == "" {
+			continue
+		}
+		if err := session.Query(clean).Exec(); err != nil {
+			return fmt.Errorf("migration error in statement [%s]: %v", clean, err)
+		}
+	}
 	return nil
 }
 
-func init() {
-	// Load local .env if present
-	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found (this may be OK if running in container)")
+// ----------------------------------------------------------------------------
+// CONNECT REDIS
+// ----------------------------------------------------------------------------
+func connectRedis() (*redis.Client, error) {
+	redisHost := getEnv("REDIS_HOST", "localhost")
+	redisPort := getEnv("REDIS_PORT", "6379")
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: fmt.Sprintf("%s:%s", redisHost, redisPort),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		return nil, err
 	}
-	// Initialize DB connections + migrations
-	if err := initDB(); err != nil {
-		log.Fatal("Failed to initialize databases:", err)
-	}
+	log.Println("Connected to Redis at", redisHost, redisPort)
+	return rdb, nil
 }
 
-// ----------------------------------------------------
-// Gin helper: checkAuthorization
-// ----------------------------------------------------
-func checkAuthorization(c *gin.Context) int {
-	userID := c.GetHeader("X-User-ID")
-	if userID == "" {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    Error{Message: "Unauthorized: missing X-User-ID"},
-		})
-		c.Abort()
-		return -1
-	}
-	userIDInt, err := strconv.Atoi(userID)
+// ----------------------------------------------------------------------------
+// HANDLERS
+// ----------------------------------------------------------------------------
+
+// addStockToUser: read-modify-write for a normal int column
+func addStockToUserHandler(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    Error{Message: "Invalid User ID"},
-		})
-		c.Abort()
-		return -1
-	}
-	return userIDInt
-}
-
-func checkCompanyAuthorization(c *gin.Context) bool {
-	userType := c.GetHeader("X-User-Type")
-	return (userType == "COMPANY")
-}
-
-// ----------------------------------------------------
-// Create Stock (Company action)
-// ----------------------------------------------------
-func createStock(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
+		writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Error: err.Error()})
 		return
 	}
-	if !checkCompanyAuthorization(c) {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    Error{Message: "Unauthorized: Only Company can perform this action"},
-		})
+	log.Printf("[addStockToUser] userID=%d", userID)
+
+	var body struct {
+		StockID  int64 `json:"stock_id"`
+		Quantity int   `json:"quantity"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid JSON"})
+		return
+	}
+	if body.StockID <= 0 || body.Quantity <= 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "stock_id and quantity must be > 0"})
 		return
 	}
 
-	var request Stock
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Data:    Error{Message: "Invalid request body"},
-		})
-		return
-	}
-
-	// Check if the stock already exists by name
-	var existingStockID int
-	err := stocksSession.Query(`
-        SELECT stock_id 
-        FROM stocks_keyspace.stock_lookup 
-        WHERE stock_name = ?
-    `, request.StockName).Scan(&existingStockID)
-
-	// If we found a stock_id AND it's nonzero, that means this name is taken
-	if err == nil && existingStockID != 0 {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Data:    Error{Message: "Stock with this name already exists"},
-		})
-		return
-	}
-
-	// Generate new stock ID = totalStocks + 1
-	var totalStocks int
-	err = stocksSession.Query(`SELECT COUNT(*) FROM stocks_keyspace.stocks`).Scan(&totalStocks)
-	if err != nil {
-		msg := "Error fetching total stocks: " + err.Error()
-		fmt.Println("❌", msg)
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Data:    Error{Message: msg},
-		})
-		return
-	}
-	request.StockID = totalStocks + 1
-	request.MarketPrice = 0.0
-	request.Quantity = 0
-	request.UpdatedAt = time.Now()
-
-	// Insert into stocks
-	err = stocksSession.Query(`
-        INSERT INTO stocks_keyspace.stocks (stock_id, stock_name, quantity, market_price, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-    `, request.StockID, request.StockName, request.Quantity, request.MarketPrice, request.UpdatedAt).Exec()
-	if err != nil {
-		msg := "Error inserting stock: " + err.Error()
-		fmt.Println("❌", msg)
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Data:    Error{Message: msg},
-		})
-		return
-	}
-
-	// Insert into stock_lookup
-	err = stocksSession.Query(`
-        INSERT INTO stocks_keyspace.stock_lookup (stock_name, stock_id)
-        VALUES (?, ?)
-    `, request.StockName, request.StockID).Exec()
-	if err != nil {
-		msg := "Error inserting stock into lookup: " + err.Error()
-		fmt.Println("❌", msg)
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Data:    Error{Message: msg},
-		})
-		return
-	}
-
-	// Return the newly created stock ID
-	type StockIDStruct struct {
-		ID int `json:"stock_id"`
-	}
-	c.JSON(http.StatusOK, Response{Success: true, Data: StockIDStruct{ID: request.StockID}})
-}
-
-// ----------------------------------------------------
-// Add Stock To User (Company action) - basically update stock quantity
-// ----------------------------------------------------
-func addStockToUser(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
-		return
-	}
-	if !checkCompanyAuthorization(c) {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    Error{Message: "Unauthorized: Only Company can perform this action"},
-		})
-		return
-	}
-
-	var request Stock
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Data:    Error{Message: "Invalid request body"},
-		})
-		return
-	}
-
-	var existingQty int
-	err := stocksSession.Query(`
-        SELECT quantity 
-        FROM stocks_keyspace.stocks 
+	// 1) Read current quantity from stocks_keyspace.stocks
+	var currentQty int
+	if err := cassandraSession.Query(`
+        SELECT quantity
+        FROM stocks_keyspace.stocks
         WHERE stock_id = ?
-    `, request.StockID).Scan(&existingQty)
+        LIMIT 1
+    `, body.StockID).Scan(&currentQty); err != nil {
+		if err == gocql.ErrNotFound {
+			currentQty = 0
+			// or create row if you'd like
+		} else {
+			writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+			return
+		}
+	}
 
-	if err != nil {
-		msg := "Invalid stock ID or error reading quantity: " + err.Error()
-		fmt.Println("❌", msg)
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false, Data: Error{Message: msg},
-		})
+	newQty := currentQty + body.Quantity
+
+	// 2) Upsert new quantity
+	// If row doesn't exist, create it; else update
+	cqlUpsert := `
+        INSERT INTO stocks_keyspace.stocks (stock_id, stock_name, quantity, updated_at)
+        VALUES (?, 'Unknown', ?, toTimestamp(now()))
+    `
+	if err := cassandraSession.Query(cqlUpsert, body.StockID, newQty).Exec(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
 		return
 	}
 
-	newQty := existingQty + request.Quantity
-	updatedAt := time.Now()
-
-	err = stocksSession.Query(`
-        UPDATE stocks_keyspace.stocks 
-        SET quantity = ?, updated_at = ?
-        WHERE stock_id = ?
-    `,
-		newQty, updatedAt, request.StockID).Exec()
-
-	if err != nil {
-		msg := "Error updating stock quantity: " + err.Error()
-		fmt.Println("❌", msg)
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Data: Error{Message: msg},
-		})
-		return
+	resp := map[string]interface{}{
+		"stock_id": body.StockID,
+		"quantity": newQty,
 	}
-	fmt.Println("✅ Stock quantity updated successfully")
-	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: resp})
 }
 
-// ----------------------------------------------------
-// Place Stock Order (Customer action) => Market or Limit
-// ----------------------------------------------------
-func placeStockOrder(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
+// placeStockOrder: uses stock_id as int64, no out-of-range errors
+func placeStockOrderHandler(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Error: err.Error()})
+		return
+	}
+	log.Printf("[placeStockOrder] userID=%d", userID)
+
+	var body struct {
+		StockID   int64   `json:"stock_id"`
+		IsBuy     bool    `json:"is_buy"`
+		OrderType string  `json:"order_type"` // "LIMIT" or "MARKET"
+		Quantity  int     `json:"quantity"`
+		Price     float64 `json:"price"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid JSON"})
+		return
+	}
+	if body.StockID <= 0 || body.Quantity <= 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid stock_id or quantity"})
+		return
+	}
+	if body.OrderType != "MARKET" && body.OrderType != "LIMIT" {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "order_type must be MARKET or LIMIT"})
 		return
 	}
 
-	var request Order
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false, Data: Error{Message: "Invalid request body"},
-		})
-		return
-	}
-	request.UserID = userID
-
-	if request.Quantity <= 0 {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false, Data: Error{Message: "Invalid quantity"},
-		})
-		return
+	finalPrice := 0.0
+	if body.OrderType == "LIMIT" {
+		if body.Price <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Price must be > 0 for LIMIT order"})
+			return
+		}
+		finalPrice = body.Price
 	}
 
-	switch strings.ToUpper(request.OrderType) {
-	case "MARKET":
-		placeMarketOrder(request, c)
-	case "LIMIT":
-		placeLimitOrder(request, c)
-	default:
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false, Data: Error{Message: "Invalid order type (must be MARKET or LIMIT)"},
-		})
+	stockTxID := uuid.New()
+	createdAt := time.Now()
+	orderStatus := "IN_PROGRESS"
+
+	// Insert into orders_by_id
+	cql1 := `
+    INSERT INTO orders_keyspace.orders_by_id (
+        stock_tx_id, parent_stock_tx_id, wallet_tx_id,
+        user_id, stock_id, order_type, is_buy, quantity, price, order_status,
+        created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
+	if err := cassandraSession.Query(cql1,
+		stockTxID.String(), nil, nil,
+		int64(userID), // user_id is bigint
+		body.StockID,
+		body.OrderType, body.IsBuy, body.Quantity, finalPrice, orderStatus,
+		createdAt, createdAt,
+	).Exec(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+		return
 	}
+
+	// Insert into orders_by_stock
+	cql2 := `
+    INSERT INTO orders_keyspace.orders_by_stock (
+        stock_id, is_buy, price, stock_tx_id,
+        parent_stock_tx_id, wallet_tx_id, user_id, order_type, quantity, order_status,
+        created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
+	if err := cassandraSession.Query(cql2,
+		body.StockID, body.IsBuy, finalPrice, stockTxID.String(),
+		nil, nil, int64(userID), body.OrderType, body.Quantity, orderStatus,
+		createdAt, createdAt,
+	).Exec(); err != nil {
+		// optional rollback from orders_by_id
+		writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	// Publish "NEW_ORDER" to Redis
+	orderMsg := map[string]interface{}{
+		"event":        "NEW_ORDER",
+		"stock_tx_id":  stockTxID.String(),
+		"stock_id":     body.StockID,
+		"is_buy":       body.IsBuy,
+		"order_type":   body.OrderType,
+		"quantity":     body.Quantity,
+		"price":        finalPrice,
+		"user_id":      userID,
+		"order_status": orderStatus,
+		"created_at":   createdAt,
+	}
+	msgBytes, _ := json.Marshal(orderMsg)
+	ctx := context.Background()
+	if err := redisClient.Publish(ctx, redisOrderChannel, string(msgBytes)).Err(); err != nil {
+		log.Printf("Redis publish error: %v", err)
+	}
+
+	resp := map[string]interface{}{
+		"stock_tx_id":  stockTxID.String(),
+		"order_status": orderStatus,
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: resp})
 }
 
-func placeMarketOrder(request Order, c *gin.Context) {
-	if request.Price != 0 {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false, Data: Error{Message: "Market orders cannot have a price"},
-		})
+// cancelStockTransaction
+func cancelStockTransactionHandler(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Error: err.Error()})
 		return
 	}
-	stockTxID := gocql.TimeUUID()
+	log.Printf("[cancelStockTransaction] userID=%d", userID)
+
+	var body struct {
+		StockTxID string `json:"stock_tx_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid JSON"})
+		return
+	}
+	if body.StockTxID == "" {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Missing stock_tx_id"})
+		return
+	}
+
+	txUUID, err := uuid.Parse(body.StockTxID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid UUID"})
+		return
+	}
+
 	now := time.Now()
 
-	var err error
-	if request.IsBuy {
-		// Insert into orders_keyspace.market_buy
-		err = ordersSession.Query(`
-            INSERT INTO orders_keyspace.market_buy
-                (stock_id, stock_tx_id, parent_stock_tx_id, wallet_tx_id, 
-                 user_id, order_type, is_buy, quantity, price, order_status, 
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-			request.StockID,
-			stockTxID,
-			nil,
-			nil,
-			request.UserID,
-			"MARKET",
-			true,
-			request.Quantity,
-			0.0,
-			"IN_PROGRESS",
-			now,
-			now,
-		).Exec()
-	} else {
-		// Insert into orders_keyspace.market_sell
-		err = ordersSession.Query(`
-            INSERT INTO orders_keyspace.market_sell
-                (stock_id, stock_tx_id, parent_stock_tx_id, wallet_tx_id,
-                 user_id, order_type, is_buy, quantity, price, order_status,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-			request.StockID,
-			stockTxID,
-			nil,
-			nil,
-			request.UserID,
-			"MARKET",
-			false,
-			request.Quantity,
-			0.0,
-			"IN_PROGRESS",
-			now,
-			now,
-		).Exec()
+	// Mark order as CANCELLED in orders_by_id
+	cql1 := `
+    UPDATE orders_keyspace.orders_by_id
+    SET order_status = ?, updated_at = ?
+    WHERE stock_tx_id = ?
+    `
+	if err := cassandraSession.Query(cql1, "CANCELLED", now, txUUID.String()).Exec(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiResponse{Success: false, Error: err.Error()})
+		return
 	}
 
+	// fetch stock_id, isBuy, price from orders_by_id
+	var stockID int64
+	var isBuy bool
+	var price float64
+	cql2 := `
+    SELECT stock_id, is_buy, price
+    FROM orders_keyspace.orders_by_id
+    WHERE stock_tx_id = ?
+    LIMIT 1
+    `
+	if err := cassandraSession.Query(cql2, txUUID.String()).Scan(&stockID, &isBuy, &price); err != nil {
+		writeJSON(w, http.StatusNotFound, apiResponse{Success: false, Error: "Order not found"})
+		return
+	}
+
+	//Remove from orders_by_stock
+	cql3 := `
+    DELETE FROM orders_keyspace.orders_by_stock
+    WHERE stock_id = ? AND is_buy = ? AND price = ? AND stock_tx_id = ?
+    `
+	if err := cassandraSession.Query(cql3, stockID, isBuy, price, txUUID.String()).Exec(); err != nil {
+		log.Printf("Warning: failed to remove from orders_by_stock: %v", err)
+	}
+
+	// Publish "CANCEL_ORDER" to Redis
+	msg := map[string]interface{}{
+		"event":       "CANCEL_ORDER",
+		"stock_tx_id": txUUID.String(),
+		"status":      "CANCELLED",
+		"updated_at":  now,
+	}
+	msgBytes, _ := json.Marshal(msg)
+	ctx := context.Background()
+	if err := redisClient.Publish(ctx, redisOrderChannel, string(msgBytes)).Err(); err != nil {
+		log.Printf("Redis publish error on cancel: %v", err)
+	}
+
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: nil})
+}
+
+// ----------------------------------------------------------------------------
+// HELPERS
+// ----------------------------------------------------------------------------
+func getUserID(r *http.Request) (int, error) {
+	userIDStr := r.Header.Get("X-User-ID")
+	if userIDStr == "" {
+		return 0, fmt.Errorf("missing X-User-ID in headers")
+	}
+	uid, err := strconv.Atoi(userIDStr)
 	if err != nil {
-		msg := "Error placing MARKET order: " + err.Error()
-		fmt.Println("❌", msg)
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Data: Error{Message: msg},
-		})
-		return
+		return 0, fmt.Errorf("invalid user_id in header")
 	}
-
-	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
+	return uid, nil
 }
 
-func placeLimitOrder(request Order, c *gin.Context) {
-	if request.Price <= 0 {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false, Data: Error{Message: "Invalid price for LIMIT order"},
-		})
-		return
-	}
-	stockTxID := gocql.TimeUUID()
-	now := time.Now()
-
-	var err error
-	if request.IsBuy {
-		// Insert into orders_keyspace.limit_buy
-		err = ordersSession.Query(`
-            INSERT INTO orders_keyspace.limit_buy
-                (stock_id, stock_tx_id, parent_stock_tx_id, wallet_tx_id,
-                 user_id, order_type, is_buy, quantity, price, order_status,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-			request.StockID,
-			stockTxID,
-			nil,
-			nil,
-			request.UserID,
-			"LIMIT",
-			true,
-			request.Quantity,
-			request.Price,
-			"IN_PROGRESS",
-			now,
-			now,
-		).Exec()
-	} else {
-		// Insert into orders_keyspace.limit_sell
-		err = ordersSession.Query(`
-            INSERT INTO orders_keyspace.limit_sell
-                (stock_id, stock_tx_id, parent_stock_tx_id, wallet_tx_id,
-                 user_id, order_type, is_buy, quantity, price, order_status,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-			request.StockID,
-			stockTxID,
-			nil,
-			nil,
-			request.UserID,
-			"LIMIT",
-			false,
-			request.Quantity,
-			request.Price,
-			"IN_PROGRESS",
-			now,
-			now,
-		).Exec()
-	}
-
-	if err != nil {
-		msg := "Error placing LIMIT order: " + err.Error()
-		fmt.Println("❌", msg)
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false, Data: Error{Message: msg},
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
+func writeJSON(w http.ResponseWriter, code int, resp apiResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// ----------------------------------------------------
-// Cancel Stock Transaction
-// ----------------------------------------------------
-func cancelStockTransaction(c *gin.Context) {
-	userID := checkAuthorization(c)
-	if userID == -1 {
-		return
+func getEnv(key, defaultVal string) string {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
 	}
-
-	var req struct {
-		StockTxID int `json:"stock_tx_id"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Data:    Error{Message: "Invalid request body"},
-		})
-		return
-	}
-
-	// For now, we simply respond success
-	fmt.Println("Cancelling stock transaction with ID:", req.StockTxID, "for user:", userID)
-	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
+	return val
 }
 
-// ----------------------------------------------------
-// main() - Start the Gin server
-// ----------------------------------------------------
-func main() {
-	r := gin.Default()
-
-	// Routes
-	r.POST("/engine/placeStockOrder", placeStockOrder)
-	r.POST("/engine/cancelStockTransaction", cancelStockTransaction)
-	r.POST("/setup/createStock", createStock)
-	r.POST("/setup/addStockToUser", addStockToUser)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
+func getLowestSellingPricesHandler(w http.ResponseWriter, r *http.Request) {
+	var reqBody struct {
+		StockIDs []int64 `json:"stock_ids"`
 	}
-	log.Printf("Order service starting on port %s", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal(err)
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "Invalid JSON"})
+		return
 	}
+	if len(reqBody.StockIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Error: "No stock_ids provided"})
+		return
+	}
+
+	var responseItems []map[string]interface{}
+	for _, stockID := range reqBody.StockIDs {
+		currentLowest := findLowestActiveSellPrice(stockID)
+		responseItems = append(responseItems, map[string]interface{}{
+			"stock_id":             stockID,
+			"current_lowest_price": currentLowest,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, apiResponse{
+		Success: true,
+		Data:    responseItems,
+	})
+}
+
+func findLowestActiveSellPrice(stockID int64) float64 {
+	cql := `
+        SELECT price
+        FROM orders_keyspace.orders_by_stock
+        WHERE stock_id = ?
+          AND is_buy = false
+          AND order_status IN ('IN_PROGRESS','PARTIALLY_COMPLETED')
+        ALLOW FILTERING
+    `
+	iter := cassandraSession.Query(cql, stockID).Iter()
+
+	var prices []float64
+	var price float64
+	for iter.Scan(&price) {
+		prices = append(prices, price)
+	}
+	if err := iter.Close(); err != nil {
+		log.Printf("Error in findLowestActiveSellPrice: %v", err)
+		return 0
+	}
+
+	if len(prices) == 0 {
+		return 0
+	}
+	minPrice := prices[0]
+	for _, p := range prices[1:] {
+		if p < minPrice {
+			minPrice = p
+		}
+	}
+	return minPrice
 }
