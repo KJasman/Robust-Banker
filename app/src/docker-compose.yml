@@ -88,8 +88,8 @@ services:
       - PORT=8082
       - TIMESCALE_HOST=timescale-db
       - TIMESCALE_PORT=5432  
-      - TIMESCALE_USER=history_user
-      - TIMESCALE_PASSWORD=history_password
+      - DB_USER=history_user
+      - DB_PASSWORD=history_password
       - TIMESCALE_DB=order_history
       - JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMe
     depends_on:
@@ -151,8 +151,8 @@ services:
     environment:
       - CASSANDRA_AUTH_ENABLED=true
       - CASSANDRA_CLUSTER_NAME=trading-cluster
-      - CASSANDRA_USER=SENG468
-      - CASSANDRA_PASSWORD=SENG468-Student
+      - DB_USER=SENG468
+      - DB_PASSWORD=SENG468-Student # Hardcoded below for healthcheck
       - MAX_HEAP_SIZE=1G  
       - HEAP_NEWSIZE=256M  
       - CASSANDRA_BROADCAST_ADDRESS=cassandra-db
@@ -166,10 +166,10 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD", "cqlsh", "-u", "${CASSANDRA_USER}", "-p", "${CASSANDRA_PASSWORD}", "-e", "DESCRIBE KEYSPACES"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD", "cqlsh", "-u", "SENG468", "-p", "SENG468-Student", "-e", "DESCRIBE KEYSPACES"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
     restart: unless-stopped
 
   wallet-service:
