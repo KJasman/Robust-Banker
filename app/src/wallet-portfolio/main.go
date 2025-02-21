@@ -13,19 +13,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
-
 	_ "github.com/lib/pq"
 )
 
 // -----------------------------------------------------------------------------
-// Custom NullString type to marshal NULL in JSON as "null" instead of an object
+// NullString - custom type to store NULL as null in JSON
 // -----------------------------------------------------------------------------
-
 type NullString struct {
 	sql.NullString
 }
 
-// MarshalJSON ensures if Valid == false, we get null in JSON.
+// MarshalJSON ensures if Valid == false, we get "null" in the final JSON.
 func (ns NullString) MarshalJSON() ([]byte, error) {
 	if !ns.Valid {
 		return []byte("null"), nil
@@ -39,7 +37,7 @@ func (ns NullString) MarshalJSON() ([]byte, error) {
 
 type WalletTransaction struct {
 	WalletTxID string     `json:"wallet_tx_id"`
-	StockTxID  NullString `json:"stock_tx_id"` // can be NULL
+	StockTxID  NullString `json:"stock_tx_id"` // can be NULL in DB
 	IsDebit    bool       `json:"is_debit"`
 	Amount     float64    `json:"amount"`
 	UpdatedAt  time.Time  `json:"updated_at"`
@@ -51,6 +49,7 @@ type StockPortfolioItem struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// Response is a generic success/data/message JSON response wrapper.
 type Response struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data"`
@@ -58,7 +57,7 @@ type Response struct {
 }
 
 // -----------------------------------------------------------------------------
-// Globals & DB Initialization
+// Globals & DB Setup
 // -----------------------------------------------------------------------------
 
 var portfolioDB *sql.DB
@@ -233,7 +232,9 @@ func getWalletBalanceHandler(c *gin.Context) {
 	err = portfolioDB.QueryRowContext(c,
 		`SELECT balance FROM wallet WHERE wallet_id=$1`, walletID).Scan(&balance)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Message: "Error reading balance"})
+		c.JSON(http.StatusInternalServerError, Response{
+			Success: false, Message: "Error reading balance",
+		})
 		return
 	}
 
@@ -273,8 +274,13 @@ func getWalletTransactionsHandler(c *gin.Context) {
 	var txs []WalletTransaction
 	for rows.Next() {
 		var t WalletTransaction
-		// stock_tx_id can be NULL, so it goes into t.StockTxID (which is NullString)
-		if scanErr := rows.Scan(&t.WalletTxID, &t.StockTxID, &t.IsDebit, &t.Amount, &t.UpdatedAt); scanErr != nil {
+		if scanErr := rows.Scan(
+			&t.WalletTxID,
+			&t.StockTxID.NullString, // store the underlying NullString
+			&t.IsDebit,
+			&t.Amount,
+			&t.UpdatedAt,
+		); scanErr != nil {
 			c.JSON(http.StatusInternalServerError, Response{
 				Success: false, Message: "Error scanning transactions",
 			})
@@ -282,6 +288,7 @@ func getWalletTransactionsHandler(c *gin.Context) {
 		}
 		txs = append(txs, t)
 	}
+
 	c.JSON(http.StatusOK, Response{Success: true, Data: txs})
 }
 
@@ -331,13 +338,10 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
-	txGroup := r.Group("/api/v1/transaction")
-	{
-		txGroup.POST("/addMoneyToWallet", addMoneyHandler)
-		txGroup.GET("/getWalletBalance", getWalletBalanceHandler)
-		txGroup.GET("/getWalletTransactions", getWalletTransactionsHandler)
-		txGroup.GET("/getStockPortfolio", getStockPortfolioHandler)
-	}
+	r.POST("/addMoneyToWallet", addMoneyHandler)
+	r.GET("/getWalletBalance", getWalletBalanceHandler)
+	r.GET("/getWalletTransactions", getWalletTransactionsHandler)
+	r.GET("/getStockPortfolio", getStockPortfolioHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {

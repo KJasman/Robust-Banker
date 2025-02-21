@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"main/middleware"
 	"net/http"
@@ -8,8 +9,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-
-	"fmt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -23,7 +22,7 @@ type ServiceConfig struct {
 var services = map[string]ServiceConfig{
 	"auth":   {URL: "http://auth-service:8080"},
 	"order":  {URL: "http://order-service:8081"},
-	"wallet": {URL: "http://wallet-service:8083"}, // Ensure port matches your wallet container
+	"wallet": {URL: "http://wallet-service:8083"},
 }
 
 func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
@@ -42,8 +41,7 @@ func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		// If the AuthMiddleware stored "user_id" and "user_type" in gin.Context,
-		// forward them as X-User-ID and X-User-Type
+		// Forward user_id/user_type as X-User-ID / X-User-Type
 		if userID, ok := c.Get("user_id"); ok {
 			c.Request.Header.Set("X-User-ID", toString(userID))
 		}
@@ -55,12 +53,11 @@ func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
 	}
 }
 
-// toString is a small helper to convert interface{} to string.
 func toString(val interface{}) string {
 	if s, ok := val.(string); ok {
 		return s
 	}
-	return strings.TrimSpace(strings.ReplaceAll((fmt.Sprintf("%v", val)), "<nil>", ""))
+	return strings.TrimSpace(strings.ReplaceAll(fmt.Sprintf("%v", val), "<nil>", ""))
 }
 
 func main() {
@@ -83,32 +80,41 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
 	})
 
-	authGroup := r.Group("/api/v1/auth")
+	// Authentication endpoints (public)
+	//
+	// e.g.:
+	// POST /authentication/register/customer
+	// POST /authentication/register/company
+	// POST /authentication/login
+	authGroup := r.Group("/authentication")
 	{
-		authProxy := newReverseProxy(services["auth"].URL, "/api/v1/auth")
+		authProxy := newReverseProxy(services["auth"].URL, "/authentication")
 		authGroup.POST("/register/customer", authProxy)
 		authGroup.POST("/register/company", authProxy)
 		authGroup.POST("/login", authProxy)
 	}
 
-	orderGroup := r.Group("/api/v1/orders")
-	orderGroup.Use(middleware.AuthMiddleware())
+	// Orders endpoints (protected). E.g. GET/POST /orders/*path
+	orders := r.Group("/orders")
+	orders.Use(middleware.AuthMiddleware())
 	{
-		orderProxy := newReverseProxy(services["order"].URL, "")
-		orderGroup.GET("/*path", orderProxy)
-		orderGroup.POST("/*path", orderProxy)
-		orderGroup.PUT("/*path", orderProxy)
-		orderGroup.DELETE("/*path", orderProxy)
+		orderProxy := newReverseProxy(services["order"].URL, "/orders")
+		orders.GET("/*path", orderProxy)
+		orders.POST("/*path", orderProxy)
+		orders.PUT("/*path", orderProxy)
+		orders.DELETE("/*path", orderProxy)
 	}
 
-	transactionGroup := r.Group("/api/v1/transaction")
-	transactionGroup.Use(middleware.AuthMiddleware())
+	// Wallet / Transaction endpoints (protected)
+	// E.g. /transaction/addMoneyToWallet, etc.
+	transaction := r.Group("/transaction")
+	transaction.Use(middleware.AuthMiddleware())
 	{
-		walletProxy := newReverseProxy(services["wallet"].URL, "")
-		transactionGroup.POST("/addMoneyToWallet", walletProxy)
-		transactionGroup.GET("/getWalletBalance", walletProxy)
-		transactionGroup.GET("/getWalletTransactions", walletProxy)
-		transactionGroup.GET("/getStockPortfolio", walletProxy)
+		walletProxy := newReverseProxy(services["wallet"].URL, "/transaction")
+		transaction.POST("/addMoneyToWallet", walletProxy)
+		transaction.GET("/getWalletBalance", walletProxy)
+		transaction.GET("/getWalletTransactions", walletProxy)
+		transaction.GET("/getStockPortfolio", walletProxy)
 	}
 
 	r.NoRoute(func(c *gin.Context) {

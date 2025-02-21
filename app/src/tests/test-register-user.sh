@@ -1,19 +1,17 @@
 #!/bin/bash
 # unorthodox semi-sloppy testing script with curl
 
-# Color codes for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 BLUE='\033[0;34m'
 
-# Define the base URL of the API gateway (not auth-service directly)
-BASE_URL="http://localhost:8000/api/v1/auth"
+# e.g. "http://localhost:8000/authentication/register/customer"
+BASE_URL="http://localhost:8000"
 
 echo -e "${BLUE}Testing Authentication Service via API Gateway${NC}"
 echo "==============================================="
 
-# Helper function to test response
 test_response() {
     local response="$1"
     local test_name="$2"
@@ -29,7 +27,7 @@ test_response() {
 
 # 1) Register a customer
 echo -e "\n${BLUE}1. Testing Customer Registration...${NC}"
-CUSTOMER_REGISTER_RESPONSE=$(curl -s -X POST "${BASE_URL}/register/customer" \
+CUSTOMER_REGISTER_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/register/customer" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "customer1",
@@ -40,7 +38,7 @@ test_response "$CUSTOMER_REGISTER_RESPONSE" "Customer Registration"
 
 # 2) Register a company
 echo -e "\n${BLUE}2. Testing Company Registration...${NC}"
-COMPANY_REGISTER_RESPONSE=$(curl -s -X POST "${BASE_URL}/register/company" \
+COMPANY_REGISTER_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/register/company" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "company1",
@@ -51,7 +49,7 @@ test_response "$COMPANY_REGISTER_RESPONSE" "Company Registration"
 
 # 3) Login as customer
 echo -e "\n${BLUE}3. Testing Customer Login...${NC}"
-CUSTOMER_LOGIN_RESPONSE=$(curl -s -X POST "${BASE_URL}/login" \
+CUSTOMER_LOGIN_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/login" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "customer1",
@@ -64,7 +62,7 @@ CUSTOMER_TOKEN=$(echo "$CUSTOMER_LOGIN_RESPONSE" | jq -r '.data.token')
 
 # 4) Login as company
 echo -e "\n${BLUE}4. Testing Company Login...${NC}"
-COMPANY_LOGIN_RESPONSE=$(curl -s -X POST "${BASE_URL}/login" \
+COMPANY_LOGIN_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/login" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "company1",
@@ -77,7 +75,7 @@ COMPANY_TOKEN=$(echo "$COMPANY_LOGIN_RESPONSE" | jq -r '.data.token')
 
 # 5) Register duplicate customer
 echo -e "\n${BLUE}5. Testing Duplicate Customer Registration...${NC}"
-DUPLICATE_CUSTOMER_RESPONSE=$(curl -s -X POST "${BASE_URL}/register/customer" \
+DUPLICATE_CUSTOMER_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/register/customer" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "customer1",
@@ -93,7 +91,7 @@ echo "------------------------------"
 
 # 6) Register duplicate company
 echo -e "\n${BLUE}6. Testing Duplicate Company Registration...${NC}"
-DUPLICATE_COMPANY_RESPONSE=$(curl -s -X POST "${BASE_URL}/register/company" \
+DUPLICATE_COMPANY_RESPONSE=$(curl -s -X POST "${BASE_URL}/authentication/register/company" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "company1",
@@ -109,7 +107,7 @@ echo "------------------------------"
 
 # 7) Login with incorrect password (Customer)
 echo -e "\n${BLUE}7. Testing Login with Incorrect Password (Customer)...${NC}"
-FAILED_CUSTOMER_LOGIN=$(curl -s -X POST "${BASE_URL}/login" \
+FAILED_CUSTOMER_LOGIN=$(curl -s -X POST "${BASE_URL}/authentication/login" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "customer1",
@@ -124,7 +122,7 @@ echo "------------------------------"
 
 # 8) Login with incorrect password (Company)
 echo -e "\n${BLUE}8. Testing Login with Incorrect Password (Company)...${NC}"
-FAILED_COMPANY_LOGIN=$(curl -s -X POST "${BASE_URL}/login" \
+FAILED_COMPANY_LOGIN=$(curl -s -X POST "${BASE_URL}/authentication/login" \
   -H "Content-Type: application/json" \
   -d '{
     "user_name": "company1",
@@ -143,5 +141,7 @@ echo -e "Customer Token: ${GREEN}$CUSTOMER_TOKEN${NC}"
 echo -e "Company Token: ${GREEN}$COMPANY_TOKEN${NC}"
 
 echo -e "\n${BLUE}Test Suite Completed${NC}"
-echo -e ""$CUSTOMER_TOKEN" > customer_token.txt"
-echo -e "Saved customer token to customer_token.txt"
+if [ -n "$CUSTOMER_TOKEN" ]; then
+  echo "$CUSTOMER_TOKEN" > customer_token.txt
+  echo "Saved customer token to customer_token.txt"
+fi

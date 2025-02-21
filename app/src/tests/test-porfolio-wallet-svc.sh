@@ -32,18 +32,18 @@ test_response() {
   echo "------------------------------"
 }
 
-echo -e "${BLUE}Testing Wallet/Transaction Endpoints via Gateway${NC}"
+echo -e "${BLUE}Testing Wallet/Transaction Endpoints via Gateway (No /api/v1)${NC}"
 echo "================================================"
 
-echo -e "${BLUE}1) POST /api/v1/transaction/addMoneyToWallet${NC}"
-ADD_MONEY_RESPONSE=$(curl -s -X POST "${BASE_URL}/api/v1/transaction/addMoneyToWallet" \
+echo -e "${BLUE}1) POST /transaction/addMoneyToWallet${NC}"
+ADD_MONEY_RESPONSE=$(curl -s -X POST "${BASE_URL}/transaction/addMoneyToWallet" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${CUSTOMER_TOKEN}" \
   -d '{"amount": 1000}')
 test_response "$ADD_MONEY_RESPONSE" "Add Money to Wallet"
 
-echo -e "${BLUE}2) GET /api/v1/transaction/getWalletBalance${NC}"
-GET_BALANCE_RESPONSE=$(curl -s -X GET "${BASE_URL}/api/v1/transaction/getWalletBalance" \
+echo -e "${BLUE}2) GET /transaction/getWalletBalance${NC}"
+GET_BALANCE_RESPONSE=$(curl -s -X GET "${BASE_URL}/transaction/getWalletBalance" \
   -H "Authorization: Bearer ${CUSTOMER_TOKEN}")
 test_response "$GET_BALANCE_RESPONSE" "Get Wallet Balance"
 
@@ -51,8 +51,8 @@ BALANCE_VALUE=$(echo "$GET_BALANCE_RESPONSE" | jq -r '.data.balance')
 echo "Current Balance: $BALANCE_VALUE"
 echo "------------------------------"
 
-echo -e "${BLUE}3) GET /api/v1/transaction/getWalletTransactions${NC}"
-GET_TRANSACTIONS_RESPONSE=$(curl -s -X GET "${BASE_URL}/api/v1/transaction/getWalletTransactions" \
+echo -e "${BLUE}3) GET /transaction/getWalletTransactions${NC}"
+GET_TRANSACTIONS_RESPONSE=$(curl -s -X GET "${BASE_URL}/transaction/getWalletTransactions" \
   -H "Authorization: Bearer ${CUSTOMER_TOKEN}")
 test_response "$GET_TRANSACTIONS_RESPONSE" "Get Wallet Transactions"
 
@@ -60,8 +60,8 @@ FIRST_TX_ID=$(echo "$GET_TRANSACTIONS_RESPONSE" | jq -r '.data[0].wallet_tx_id')
 echo "First Transaction ID: $FIRST_TX_ID"
 echo "------------------------------"
 
-echo -e "${BLUE}4) GET /api/v1/transaction/getStockPortfolio${NC}"
-GET_PORTFOLIO_RESPONSE=$(curl -s -X GET "${BASE_URL}/api/v1/transaction/getStockPortfolio" \
+echo -e "${BLUE}4) GET /transaction/getStockPortfolio${NC}"
+GET_PORTFOLIO_RESPONSE=$(curl -s -X GET "${BASE_URL}/transaction/getStockPortfolio" \
   -H "Authorization: Bearer ${CUSTOMER_TOKEN}")
 test_response "$GET_PORTFOLIO_RESPONSE" "Get Stock Portfolio"
 
