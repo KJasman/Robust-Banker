@@ -230,10 +230,10 @@ func checkAuthorization(c *gin.Context) int {
 	return userIDInt
 }
 
-func checkCompanyAuthorization(c *gin.Context) bool {
-	userType := c.GetHeader("X-User-Type")
-	return (userType == "COMPANY")
-}
+// func checkCompanyAuthorization(c *gin.Context) bool {
+// 	userType := c.GetHeader("X-User-Type")
+// 	return (userType == "COMPANY")
+// }
 
 // ----------------------------------------------------
 // Create Stock (Company action)
@@ -243,13 +243,13 @@ func createStock(c *gin.Context) {
 	if userID == -1 {
 		return
 	}
-	if !checkCompanyAuthorization(c) {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    Error{Message: "Unauthorized: Only Company can perform this action"},
-		})
-		return
-	}
+	// if !checkCompanyAuthorization(c) {
+	// 	c.JSON(http.StatusUnauthorized, Response{
+	// 		Success: false,
+	// 		Data:    Error{Message: "Unauthorized: Only Company can perform this action"},
+	// 	})
+	// 	return
+	// }
 
 	var request Stock
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -339,13 +339,13 @@ func addStockToUser(c *gin.Context) {
 	if userID == -1 {
 		return
 	}
-	if !checkCompanyAuthorization(c) {
-		c.JSON(http.StatusUnauthorized, Response{
-			Success: false,
-			Data:    Error{Message: "Unauthorized: Only Company can perform this action"},
-		})
-		return
-	}
+	// if !checkCompanyAuthorization(c) {
+	// 	c.JSON(http.StatusUnauthorized, Response{
+	// 		Success: false,
+	// 		Data:    Error{Message: "Unauthorized: Only Company can perform this action"},
+	// 	})
+	// 	return
+	// }
 
 	var request Stock
 	if err := c.ShouldBindJSON(&request); err != nil {
