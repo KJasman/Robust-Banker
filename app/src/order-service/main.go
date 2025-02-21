@@ -257,6 +257,7 @@ func createStock(c *gin.Context) {
 			Success: false,
 			Data:    Error{Message: "Invalid request body"},
 		})
+		fmt.Println("❌ Invalid request body:", err)
 		return
 	}
 
@@ -347,17 +348,33 @@ func addStockToUser(c *gin.Context) {
 	// 	return
 	// }
 
-	var request Stock
-	if err := c.ShouldBindJSON(&request); err != nil {
+	var req struct {
+		StockID  string `json:"stock_id"`
+		Quantity int    `json:"quantity"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, Response{
 			Success: false,
 			Data:    Error{Message: "Invalid request body"},
 		})
+		fmt.Println("❌ Invalid request body:", err)
+
 		return
 	}
+	stockID, err := strconv.Atoi(req.StockID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Success: false,
+			Data:    Error{Message: "Invalid stock ID"},
+		})
+		return
+	}
+	var request Stock
+	request.StockID = stockID
+	request.Quantity = req.Quantity
 
 	var existingQty int
-	err := stocksSession.Query(`
+	err = stocksSession.Query(`
         SELECT quantity 
         FROM stocks_keyspace.stocks 
         WHERE stock_id = ?
@@ -403,13 +420,32 @@ func placeStockOrder(c *gin.Context) {
 		return
 	}
 
-	var request Order
-	if err := c.ShouldBindJSON(&request); err != nil {
+	var req struct {
+		StockID   string  `json:"stock_id"`
+		IsBuy     bool    `json:"is_buy"`
+		Quantity  int     `json:"quantity"`
+		Price     float64 `json:"price"`
+		OrderType string  `json:"order_type"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, Response{
 			Success: false, Data: Error{Message: "Invalid request body"},
 		})
 		return
 	}
+	stockID, err := strconv.Atoi(req.StockID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Success: false, Data: Error{Message: "Invalid stock ID"},
+		})
+		return
+	}
+	var request Order
+	request.StockID = stockID
+	request.IsBuy = req.IsBuy
+	request.Quantity = req.Quantity
+	request.Price = req.Price
+	request.OrderType = req.OrderType
 	request.UserID = userID
 
 	if request.Quantity <= 0 {
@@ -579,7 +615,7 @@ func cancelStockTransaction(c *gin.Context) {
 	}
 
 	var req struct {
-		StockTxID int `json:"stock_tx_id"`
+		StockTxID string `json:"stock_tx_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, Response{
@@ -589,8 +625,10 @@ func cancelStockTransaction(c *gin.Context) {
 		return
 	}
 
+	stockTxUUID := gocql.TimeUUID()
+
 	// For now, we simply respond success
-	fmt.Println("Cancelling stock transaction with ID:", req.StockTxID, "for user:", userID)
+	fmt.Println("Cancelling stock transaction with ID:", stockTxUUID, "for user:", userID)
 	c.JSON(http.StatusOK, Response{Success: true, Data: nil})
 }
 
