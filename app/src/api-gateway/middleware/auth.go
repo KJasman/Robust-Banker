@@ -16,7 +16,6 @@ import (
 
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Get the Authorization header
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -27,10 +26,8 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Check Bearer token format
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
-
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Invalid token format",
@@ -42,9 +39,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		tokenString := parts[1]
 		fmt.Println("Token received:", tokenString)
 
-		// Parse and validate the token
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Validate signing method
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, jwt.ErrSignatureInvalid
 			}
@@ -60,7 +55,6 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Extract claims and set in context if needed
 		if claims, ok := token.Claims.(jwt.MapClaims); ok {
 			c.Set("user_id", claims["user_id"])
 			c.Set("username", claims["username"])
@@ -72,23 +66,19 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-// RateLimitMiddleware creates a new rate limiter middleware
 func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
-	// Get rate limit configurations from environment
 	limit, _ := strconv.Atoi(os.Getenv("RATE_LIMIT"))
 	if limit == 0 {
-		limit = 100 // default value
+		limit = 100
 	}
 
 	windowStr := os.Getenv("RATE_LIMIT_WINDOW")
 	window, err := time.ParseDuration(windowStr)
 	if err != nil {
-		window = time.Minute // default value
+		window = time.Minute
 	}
 
 	return func(c *gin.Context) {
-		// Get identifier for rate limiting
-		// Use user_id if authenticated, otherwise use IP
 		var identifier string
 		if userId, exists := c.Get("user_id"); exists {
 			identifier = fmt.Sprintf("ratelimit:user:%v", userId)
@@ -98,7 +88,6 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 
 		ctx := context.Background()
 
-		// Get current count
 		count, err := rdb.Get(ctx, identifier).Int()
 		if err != nil && err != redis.Nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -109,7 +98,6 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 			return
 		}
 
-		// If key doesn't exist, create it with count 0
 		if err == redis.Nil {
 			count = 0
 		}
@@ -123,7 +111,6 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 			return
 		}
 
-		// Increment counter and set expiry using pipeline
 		pipe := rdb.Pipeline()
 		pipe.Incr(ctx, identifier)
 		if count == 0 {
@@ -139,7 +126,6 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 			return
 		}
 
-		// Add rate limit headers
 		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
 		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", limit-count-1))
 		c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(window).Unix()))

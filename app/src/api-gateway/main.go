@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
@@ -21,7 +23,7 @@ type ServiceConfig struct {
 var services = map[string]ServiceConfig{
 	"auth":   {URL: "http://auth-service:8080"},
 	"order":  {URL: "http://order-service:8081"},
-	"wallet": {URL: "http://wallet-service:8082"},
+	"wallet": {URL: "http://wallet-service:8083"}, // Ensure port matches your wallet container
 }
 
 func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
@@ -30,6 +32,7 @@ func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
 		log.Fatalf("Invalid target base: %v", err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
@@ -37,15 +40,37 @@ func newReverseProxy(targetBase string, stripPrefix string) gin.HandlerFunc {
 			req.URL.Path = strings.TrimPrefix(req.URL.Path, stripPrefix)
 		}
 	}
+
 	return func(c *gin.Context) {
+		// If the AuthMiddleware stored "user_id" and "user_type" in gin.Context,
+		// forward them as X-User-ID and X-User-Type
+		if userID, ok := c.Get("user_id"); ok {
+			c.Request.Header.Set("X-User-ID", toString(userID))
+		}
+		if userType, ok := c.Get("user_type"); ok {
+			c.Request.Header.Set("X-User-Type", toString(userType))
+		}
+
 		proxy.ServeHTTP(c.Writer, c.Request)
 	}
 }
 
+// toString is a small helper to convert interface{} to string.
+func toString(val interface{}) string {
+	if s, ok := val.(string); ok {
+		return s
+	}
+	return strings.TrimSpace(strings.ReplaceAll((fmt.Sprintf("%v", val)), "<nil>", ""))
+}
+
 func main() {
 	_ = godotenv.Load()
-	rdb := redis.NewClient(&redis.Options{Addr: "redis:6379"})
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "redis:6379",
+	})
 	r := gin.Default()
+
 	r.Use(middleware.RateLimitMiddleware(rdb))
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Frame-Options", "DENY")
@@ -87,7 +112,10 @@ func main() {
 	}
 
 	r.NoRoute(func(c *gin.Context) {
-		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Route not found"})
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Route not found",
+		})
 	})
 
 	port := os.Getenv("PORT")
